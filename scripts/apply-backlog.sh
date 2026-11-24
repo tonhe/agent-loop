@@ -3,6 +3,7 @@
 # Usage: apply-backlog.sh WORK_DIR   (expects candidates.json, current-labels.json, external.json, claude/result.json)
 # Env:   GH_TOKEN (the PAT, so changes appear as the owner), GITHUB_REPOSITORY,
 #        ALLOW_MEDIUM_RISK (true|false), DRY_RUN (true|false), MAX_NEW_ISSUES
+# Exit:  0 ok, 5 there were candidates but the plan applied nothing (digest is still printed).
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 w=$1
@@ -77,12 +78,30 @@ done < <(jq -c '.apply[]' "$w/validated.json")
 rejected=$(jq -r '.rejected[] | "- #\(.issue): \(.reason)"' "$w/validated.json")
 external=$(jq -r 'if length == 0 then "none" else map("#\(.number) by \(.author)") | join(", ") end' "$w/external.json")
 
+# Every candidate should get an action. Name the ones the plan skipped, and treat a plan
+# that applies nothing at all as a failed run rather than a quiet success.
+n_cand=$(jq 'length' "$w/candidates.json")
+n_apply=$(jq '.apply | length' "$w/validated.json")
+unanswered=$(jq -r --slurpfile plan "$w/claude/result.json" \
+  '[.[].number] - [($plan[0].actions // [])[].issue] | map("#\(.)") | join(", ")' "$w/candidates.json")
+empty_plan=false
+if (( n_cand > 0 && n_apply == 0 )); then empty_plan=true; fi
+
 {
   echo "**Backlog: ${GITHUB_REPOSITORY#*/}**"
   jq -r '.summary // ""' "$w/claude/result.json"
   echo
-  if (( ${#digest[@]} )); then printf '%s\n' "${digest[@]}"; else echo "- nothing needed assessment"; fi
+  if [[ $empty_plan == true ]]; then
+    echo "**FAILED: the plan had no usable actions for $n_cand candidate issue(s). Nothing was applied.**"
+  elif (( ${#digest[@]} )); then printf '%s\n' "${digest[@]}"
+  else echo "- nothing needed assessment"; fi
+  [[ -n $unanswered && $empty_plan == false ]] && echo "No action returned for: $unanswered"
   [[ -n $rejected ]] && { echo "Rejected by guardrails:"; echo "$rejected"; }
   [[ -s "$w/blocked.json" ]] && echo "Waiting on blockers: $(jq -r 'length' "$w/blocked.json") issue(s)"
   echo "External issues waiting for you to adopt: $external"
 }
+
+if [[ $empty_plan == true ]]; then
+  echo "::error::Backlog plan had no usable actions for $n_cand candidate issue(s)" >&2
+  exit 5
+fi

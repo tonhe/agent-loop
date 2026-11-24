@@ -189,5 +189,35 @@ check "publish: exactly one Closes line" "1" "$(grep -ci '^Closes #36$' "$stub/l
 check "publish: model body kept" "1" "$(grep -c 'What changed' "$stub/log3")"
 rm -rf "$stub"
 
+# ---------- apply-backlog.sh (stubbed gh, dry run) ----------
+ab=$(mktemp -d); mkdir -p "$ab/bin" "$ab/w/claude"
+printf '#!/usr/bin/env bash\necho "$*" >> "$GHLOG"\n' > "$ab/bin/gh"; chmod +x "$ab/bin/gh"
+echo '[{"number":1,"title":"a"},{"number":2,"title":"b"}]' > "$ab/w/candidates.json"
+echo '{"1":[],"2":[]}' > "$ab/w/current-labels.json"
+echo '[]' > "$ab/w/external.json"
+abrun() { PATH="$ab/bin:$PATH" GHLOG="$ab/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe DRY_RUN=true \
+            bash "$root/scripts/apply-backlog.sh" "$ab/w" 2>/dev/null; }
+
+echo '{"summary":"Nothing to do.","actions":[]}' > "$ab/w/claude/result.json"
+out=$(abrun); rc=$?
+check "apply: candidates but empty plan -> exit 5" "5" "$rc"
+check "apply: empty plan says so in the digest" "1" "$(grep -c 'FAILED: the plan had no usable actions for 2 candidate' <<<"$out")"
+
+echo '{"summary":"s","actions":[{"issue":99,"add_labels":["risk:low"],"remove_labels":[]}]}' > "$ab/w/claude/result.json"
+out=$(abrun); rc=$?
+check "apply: every action rejected counts as empty -> exit 5" "5" "$rc"
+check "apply: rejection still listed" "1" "$(grep -c '#99: issue not in allowed set' <<<"$out")"
+
+echo '{"summary":"s","actions":[{"issue":1,"add_labels":["risk:low","type:docs"],"remove_labels":[],"assessment":"ok"}]}' > "$ab/w/claude/result.json"
+out=$(abrun); rc=$?
+check "apply: partial plan -> exit 0" "0" "$rc"
+check "apply: skipped candidate named in the digest" "1" "$(grep -c '^No action returned for: #2$' <<<"$out")"
+check "apply: applied issue listed" "1" "$(grep -c '^- #1 +risk:low,type:docs$' <<<"$out")"
+
+echo '[]' > "$ab/w/candidates.json"; echo '{"summary":"s","actions":[]}' > "$ab/w/claude/result.json"
+out=$(abrun); rc=$?
+check "apply: no candidates and empty plan -> exit 0" "0" "$rc"
+rm -rf "$ab"
+
 echo; echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]

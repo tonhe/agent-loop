@@ -79,9 +79,37 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           MAX_NEW_ISSUES: ${{ inputs.max_new_issues }}
         run: |
-          W="$RUNNER_TEMP/work"
-          "$RUNNER_TEMP/agent-loop/scripts/apply-backlog.sh" "$W" > "$W/digest.md"
+          W="$RUNNER_TEMP/work"; rc=0
+          "$RUNNER_TEMP/agent-loop/scripts/apply-backlog.sh" "$W" > "$W/digest.md" || rc=$?
           cat "$W/digest.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # Keep what Claude proposed and what the guardrails let through, so a run that
+      # applies nothing can be explained afterwards.
+      - name: Record the plan
+        if: always() && steps.gather.outputs.count != '0'
+        run: |
+          W="$RUNNER_TEMP/work"
+          for f in claude/usage.json claude/result.json validated.json; do
+            [[ -s "$W/$f" ]] || continue
+            # Five backticks: assessments are Markdown and may contain their own code fences.
+            { echo; echo "<details><summary>$f</summary>"; echo; echo '`````json'
+              jq . "$W/$f"; echo '`````'; echo; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Upload the plan
+        if: always() && steps.gather.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backlog-plan
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/work/candidates.json
+            ${{ runner.temp }}/work/blocked.json
+            ${{ runner.temp }}/work/validated.json
+            ${{ runner.temp }}/work/digest.md
+            ${{ runner.temp }}/work/claude/result.json
+            ${{ runner.temp }}/work/claude/usage.json
 
       - name: Digest
         if: always()
