@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "findings"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "block"]},
+    "summary": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "comment"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["blocking", "minor"]},
+          "file": {"type": "string"},
+          "line": {"type": "integer"},
+          "comment": {"type": "string"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,173 @@
+# Reusable: after reviews land on an agent PR, run ONE fix round, then enable
+# auto-merge for risk:low. Call it on pull_request_review and on a schedule (sweep).
+name: agent-loop followup
+
+on:
+  workflow_call:
+    inputs:
+      pr:               {type: string, default: "", description: "One PR; empty = sweep all open agent PRs"}
+      owner_login:      {type: string, required: true}
+      git_author_name:  {type: string, required: true}
+      git_author_email: {type: string, required: true}
+      verify_command:   {type: string, required: true}
+      bash_allow:       {type: string, required: true}
+      protected_paths:  {type: string, default: ""}
+      go_version_file:  {type: string, default: ""}
+      setup_command:    {type: string, default: ""}
+      base_branch:      {type: string, default: main}
+      grace_minutes:    {type: number, default: 120, description: "Stop waiting for CodeRabbit after this"}
+      auto_merge:       {type: boolean, default: true}
+      model:            {type: string, default: sonnet}
+      max_turns:        {type: number, default: 40}
+      timeout_minutes:  {type: number, default: 20}
+      claude_version:   {type: string, default: "2.1.331"}
+      loop_ref:         {type: string, default: main}
+      loop_repo:        {type: string, default: tonhe/agent-loop}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: {required: true}
+      AGENT_PAT:               {required: true}
+      DISCORD_WEBHOOK_URL:     {required: false}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      fix: ${{ steps.p.outputs.fix }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", persist-credentials: false}
+      - id: p
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          PR_INPUT: ${{ inputs.pr }}
+          GRACE: ${{ inputs.grace_minutes }}
+          AUTO_MERGE: ${{ inputs.auto_merge }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [[ -n "$PR_INPUT" ]]; then prs="$PR_INPUT"
+          else prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --author "$OWNER_LOGIN" --limit 50 --json number,body \
+                       --jq '.[] | select(.body | test("agent-loop issue=[0-9]+")) | .number'); fi
+          fix='[]'; merged=()
+          for pr in $prs; do
+            view=$(gh pr view "$pr" -R "$GITHUB_REPOSITORY" --json number,body,createdAt,isCrossRepository,state,comments,reviews,author)
+            [[ $(jq -r '.author.login' <<<"$view") == "$OWNER_LOGIN" ]] || continue
+            issue=$(jq -r '.body' <<<"$view" | grep -oE 'agent-loop issue=[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+            labels='[]'; [[ -n "$issue" ]] && labels=$(gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name]')
+            d=$(jq -n --argjson pr "$view" --argjson l "$labels" --argjson now "$(date +%s)" '{pr: $pr, issue_labels: $l, now: $now}' \
+                | jq -c --arg owner "$OWNER_LOGIN" --argjson grace_minutes "$GRACE" -f lib/followup.jq)
+            echo "PR #$pr: $(jq -r .reason <<<"$d")"
+            if [[ $(jq -r .fix_round <<<"$d") == true ]]; then fix=$(jq -c --argjson p "$pr" '. + [$p]' <<<"$fix"); fi
+            if [[ $(jq -r .auto_merge <<<"$d") == true && "$AUTO_MERGE" == true ]]; then
+              state=$(gh pr view "$pr" -R "$GITHUB_REPOSITORY" --json autoMergeRequest --jq '.autoMergeRequest != null')
+              if [[ "$state" != true ]] && bash scripts/enable-automerge.sh "$pr"; then merged+=("#$pr"); fi
+            fi
+          done
+          echo "fix=$(jq -c '.[:3]' <<<"$fix")" >> "$GITHUB_OUTPUT"
+          if (( ${#merged[@]} )); then
+            echo "**Followup: ${GITHUB_REPOSITORY#*/}** auto-merge queued for ${merged[*]} (merges when checks pass)" | bash scripts/discord.sh
+          fi
+
+  fix:
+    needs: plan
+    if: needs.plan.outputs.fix != '[]' && needs.plan.outputs.fix != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        pr: ${{ fromJSON(needs.plan.outputs.fix) }}
+    concurrency: {group: "agent-fix-${{ github.repository }}-${{ matrix.pr }}", cancel-in-progress: false}
+    env:
+      PR: ${{ matrix.pr }}
+      OWNER_LOGIN: ${{ inputs.owner_login }}
+    steps:
+      - name: Find branch and mark the round used (before running, so it can never loop)
+        id: meta
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          v=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefName,body)
+          echo "branch=$(jq -r .headRefName <<<"$v")" >> "$GITHUB_OUTPUT"
+          echo "issue=$(jq -r .body <<<"$v" | grep -oE 'agent-loop issue=[0-9]+' | head -1 | grep -oE '[0-9]+')" >> "$GITHUB_OUTPUT"
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "<!-- agent-fix-round -->Agent fix round started: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - uses: actions/checkout@v4
+        with: {ref: "${{ steps.meta.outputs.branch }}", persist-credentials: false, fetch-depth: 1}
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+      - run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
+      - if: inputs.go_version_file != ''
+        uses: actions/setup-go@v5
+        with: {go-version-file: "${{ inputs.go_version_file }}"}
+      - if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
+      - run: npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
+
+      - name: Build prompt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_COMMAND: ${{ inputs.verify_command }}
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
+          ISSUE: ${{ steps.meta.outputs.issue }}
+        run: |
+          L="$RUNNER_TEMP/agent-loop"
+          { bash "$L/scripts/render-prompt.sh" "$L/prompts/fix.md"; echo
+            echo "## Issue"; bash "$L/scripts/issue-context.sh" "$ISSUE"; echo
+            bash "$L/scripts/review-context.sh" "$PR"; } > "$RUNNER_TEMP/prompt.md"
+
+      - name: Claude addresses review feedback
+        id: claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+          ALLOWED_TOOLS: "Read,Grep,Glob,Edit,Write,Bash(git diff:*),Bash(git status:*),Bash(git log:*),${{ inputs.bash_allow }}"
+        run: |
+          set +e
+          bash "$RUNNER_TEMP/agent-loop/scripts/run-claude.sh" "$RUNNER_TEMP/prompt.md" "$RUNNER_TEMP/agent-loop/schemas/dev-result.json" "$RUNNER_TEMP/claude"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Check diff and verify (no secrets)
+        id: check
+        env:
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
+          VERIFY_COMMAND: ${{ inputs.verify_command }}
+          RC: ${{ steps.claude.outputs.rc }}
+        run: |
+          status=$(jq -r '.status // "error"' "$RUNNER_TEMP/claude/result.json" 2>/dev/null || echo error)
+          if [[ "$RC" != "0" || "$status" != "done" ]]; then echo "status=stopped" >> "$GITHUB_OUTPUT"; exit 0; fi
+          set +e; bash "$RUNNER_TEMP/agent-loop/scripts/check-diff.sh"; d=$?; set -e
+          if [[ $d -eq 2 ]]; then echo "status=no_change" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [[ $d -ne 0 ]]; then echo "status=rejected" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git diff --cached --binary > "$RUNNER_TEMP/change.patch"
+          if bash -c "$VERIFY_COMMAND" > "$RUNNER_TEMP/verify.log" 2>&1; then echo "status=ok" >> "$GITHUB_OUTPUT"
+          else tail -40 "$RUNNER_TEMP/verify.log"; echo "status=verify_failed" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.check.outputs.status == 'ok'
+        uses: actions/checkout@v4
+        with: {ref: "${{ steps.meta.outputs.branch }}", path: .publish, persist-credentials: false, fetch-depth: 1}
+
+      - name: Push fix or report
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          PUSH_TOKEN: ${{ secrets.AGENT_PAT }}
+          GIT_AUTHOR_NAME: ${{ inputs.git_author_name }}
+          GIT_AUTHOR_EMAIL: ${{ inputs.git_author_email }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          STATUS: ${{ steps.check.outputs.status }}
+          ISSUE: ${{ steps.meta.outputs.issue }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          L="$RUNNER_TEMP/agent-loop"
+          summary=$(jq -r '.summary // ""' "$RUNNER_TEMP/claude/result.json" 2>/dev/null || echo "")
+          if [[ "$STATUS" == ok ]]; then
+            cd .publish && git apply --index "$RUNNER_TEMP/change.patch"
+            bash "$L/scripts/publish-pr.sh" "$ISSUE" "$RUNNER_TEMP/claude/result.json" "$PR" >/dev/null
+            line="pushed fixes"
+          elif [[ "$STATUS" == no_change ]]; then line="no changes needed"
+          else line="stopped ($STATUS); left for you"; fi
+          echo "**Followup: ${GITHUB_REPOSITORY#*/}** PR #$PR: $line"$'\n'"$summary" | bash "$L/scripts/discord.sh"

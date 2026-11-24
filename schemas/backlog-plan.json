@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["actions", "summary"],
+  "properties": {
+    "summary": {"type": "string", "description": "Two or three sentences for the nightly digest."},
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issue", "add_labels", "remove_labels"],
+        "properties": {
+          "issue": {"type": "integer"},
+          "add_labels": {"type": "array", "items": {"type": "string"}},
+          "remove_labels": {"type": "array", "items": {"type": "string"}},
+          "assessment": {"type": ["string", "null"], "description": "Markdown: acceptance criteria, verification, scope, risk reasoning."},
+          "question": {"type": ["string", "null"], "description": "Markdown questions for the owner when needs:human."},
+          "split_into": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["title", "body"],
+              "properties": {"title": {"type": "string"}, "body": {"type": "string"}}
+            }
+          }
+        }
+      }
+    }
+  }
+}

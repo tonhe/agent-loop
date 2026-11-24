@@ -1,0 +1,101 @@
+# Reusable: nightly backlog triage. Claude proposes a plan; scripts enforce and apply it.
+name: agent-loop backlog
+
+on:
+  workflow_call:
+    inputs:
+      owner_login:      {type: string, required: true,  description: "Only this user's issues are triaged"}
+      verify_command:   {type: string, required: true,  description: "Command that proves a change works, e.g. make test-all"}
+      model:            {type: string, default: sonnet}
+      max_turns:        {type: number, default: 30}
+      timeout_minutes:  {type: number, default: 20}
+      max_candidates:   {type: number, default: 25}
+      max_new_issues:   {type: number, default: 10}
+      allow_medium_risk: {type: boolean, default: false}
+      dry_run:          {type: boolean, default: false, description: "Plan only; change nothing"}
+      claude_version:   {type: string, default: "2.1.331"}
+      loop_ref:         {type: string, default: main, description: "Ref of tonhe/agent-loop to load scripts from; match the @ref you call"}
+      loop_repo:        {type: string, default: tonhe/agent-loop}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: {required: true}
+      AGENT_PAT:               {required: true}
+      DISCORD_WEBHOOK_URL:     {required: false}
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false, fetch-depth: 1}
+
+      - name: Load agent-loop scripts outside the workspace
+        uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+      - run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop" && chmod +x "$RUNNER_TEMP"/agent-loop/scripts/*.sh
+
+      - name: Gather candidates (owner's issues only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          MAX_CANDIDATES: ${{ inputs.max_candidates }}
+        run: |
+          W="$RUNNER_TEMP/work"
+          "$RUNNER_TEMP/agent-loop/scripts/backlog-candidates.sh" "$W"
+          echo "count=$(jq length "$W/candidates.json")" >> "$GITHUB_OUTPUT"
+        id: gather
+
+      - name: Install Claude Code
+        if: steps.gather.outputs.count != '0'
+        run: npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
+
+      - name: Build prompt
+        if: steps.gather.outputs.count != '0'
+        env:
+          VERIFY_COMMAND: ${{ inputs.verify_command }}
+        run: |
+          L="$RUNNER_TEMP/agent-loop"; W="$RUNNER_TEMP/work"
+          { "$L/scripts/render-prompt.sh" "$L/prompts/backlog.md"
+            echo; echo '```json'; cat "$W/candidates.json"; echo '```'; } > "$W/prompt.md"
+
+      - name: Claude proposes a plan (read-only tools)
+        if: steps.gather.outputs.count != '0'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+          ALLOWED_TOOLS: "Read,Grep,Glob"
+        run: |
+          L="$RUNNER_TEMP/agent-loop"; W="$RUNNER_TEMP/work"
+          "$L/scripts/run-claude.sh" "$W/prompt.md" "$L/schemas/backlog-plan.json" "$W/claude"
+
+      - name: Enforce and apply plan
+        if: steps.gather.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          ALLOW_MEDIUM_RISK: ${{ inputs.allow_medium_risk }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_NEW_ISSUES: ${{ inputs.max_new_issues }}
+        run: |
+          W="$RUNNER_TEMP/work"
+          "$RUNNER_TEMP/agent-loop/scripts/apply-backlog.sh" "$W" > "$W/digest.md"
+          cat "$W/digest.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Digest
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COUNT: ${{ steps.gather.outputs.count }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          W="$RUNNER_TEMP/work"
+          if [[ -s "$W/digest.md" ]]; then msg=$(cat "$W/digest.md")
+          elif [[ "$COUNT" == "0" ]]; then msg="**Backlog: ${GITHUB_REPOSITORY#*/}**"$'\n'"Nothing new to triage."
+          else msg="**Backlog: ${GITHUB_REPOSITORY#*/}** finished with status $JOB_STATUS."; fi
+          if [[ -s "$W/claude/usage.json" ]]; then
+            msg+=$'\n'"Claude: $(jq -r '"\(.num_turns) turns, \(.duration_ms/60000 | floor) min"' "$W/claude/usage.json")"
+          fi
+          printf '%s\n<%s>\n' "$msg" "$RUN_URL" | "$RUNNER_TEMP/agent-loop/scripts/discord.sh"

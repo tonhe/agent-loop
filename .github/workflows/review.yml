@@ -1,0 +1,87 @@
+# Reusable: Claude review of agent PRs. Make the job "agent-review" a required status check.
+# Non-agent PRs and fork PRs pass straight through (they are yours to review).
+name: agent-loop review
+
+on:
+  workflow_call:
+    inputs:
+      owner_login:     {type: string, required: true}
+      platforms:       {type: string, default: "Linux, macOS, and Windows"}
+      verify_command:  {type: string, required: true}
+      model:           {type: string, default: sonnet}
+      max_turns:       {type: number, default: 25}
+      timeout_minutes: {type: number, default: 15}
+      claude_version:  {type: string, default: "2.1.331"}
+      loop_ref:        {type: string, default: main}
+      loop_repo:       {type: string, default: tonhe/agent-loop}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: {required: true}
+
+jobs:
+  agent-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Is this an agent PR?
+        id: gate
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+        run: |
+          n=$(grep -oE 'agent-loop issue=[0-9]+' <<<"$BODY" | head -1 | grep -oE '[0-9]+' || true)
+          if [[ "$FORK" == "true" || -z "$n" || "$AUTHOR" != "$OWNER_LOGIN" ]]; then
+            echo "Not an agent PR; nothing to review here."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "issue=$n" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with: {ref: "${{ github.event.pull_request.head.sha }}", persist-credentials: false, fetch-depth: 0}
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+
+      - name: Build review prompt
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          VERIFY_COMMAND: ${{ inputs.verify_command }}
+          PLATFORMS: ${{ inputs.platforms }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ISSUE: ${{ steps.gate.outputs.issue }}
+        run: |
+          mv .agent-loop-src "$RUNNER_TEMP/agent-loop"; L="$RUNNER_TEMP/agent-loop"
+          { bash "$L/scripts/render-prompt.sh" "$L/prompts/review.md"; echo
+            echo "## Issue"; bash "$L/scripts/issue-context.sh" "$ISSUE"; echo
+            echo "## Diff"; echo '```diff'; git diff "$BASE_SHA"...HEAD; echo '```'; } > "$RUNNER_TEMP/prompt.md"
+          npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
+
+      - name: Claude reviews (read-only tools)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+          ALLOWED_TOOLS: "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/run-claude.sh" "$RUNNER_TEMP/prompt.md" "$RUNNER_TEMP/agent-loop/schemas/review.json" "$RUNNER_TEMP/claude"
+
+      # Posted with the workflow's own token, so it shows as github-actions[bot], not as you.
+      - name: Post review and set the check
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          R="$RUNNER_TEMP/claude/result.json"
+          body=$(jq -r '"<!-- agent-review -->\n### Agent review: \(.verdict | ascii_upcase)\n\n\(.summary)\n\n"
+            + (.findings | map("- **\(.severity)** " + (if .file then "`\(.file)" + (if .line then ":\(.line)" else "" end) + "` " else "" end) + .comment) | join("\n"))' "$R")
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$body"
+          echo "$body" >> "$GITHUB_STEP_SUMMARY"
+          [[ $(jq -r '.verdict' "$R") == "pass" ]] || { echo "::error::Agent review blocked this PR"; exit 1; }

@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary"],
+  "properties": {
+    "status": {"type": "string", "enum": ["done", "blocked", "too_big"]},
+    "summary": {"type": "string", "description": "One or two sentences on what changed or why it stopped."},
+    "commit_message": {"type": "string", "description": "Conventional one-line subject, optional body. No AI attribution."},
+    "pr_title": {"type": "string"},
+    "pr_body": {"type": "string", "description": "Markdown: what changed, how it was verified."},
+    "split_suggestion": {"type": "string", "description": "When too_big or blocked: how to split or what is needed."}
+  }
+}

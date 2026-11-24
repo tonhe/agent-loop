@@ -1,0 +1,221 @@
+# Reusable: dev agent. Picks owner-authored, agent:ready issues (or one issue on demand),
+# lets Claude change code with a narrow tool allowlist, then verifies, commits as the
+# owner, and opens a PR. Each issue is its own job so one runaway cannot sink the rest.
+name: agent-loop dev
+
+on:
+  workflow_call:
+    inputs:
+      mode:             {type: string, required: true, description: "scheduled | manual | urgent"}
+      issue:            {type: string, default: ""}
+      owner_login:      {type: string, required: true}
+      git_author_name:  {type: string, required: true}
+      git_author_email: {type: string, required: true, description: "Use your GitHub noreply address"}
+      verify_command:   {type: string, required: true}
+      bash_allow:       {type: string, required: true, description: "Extra allowed tools, e.g. Bash(go test:*),Bash(make test-all)"}
+      protected_paths:  {type: string, default: "", description: "Newline-separated pathspecs the agent may not change (.github/ is always protected)"}
+      go_version_file:  {type: string, default: "", description: "Set to go.mod to install Go"}
+      setup_command:    {type: string, default: "", description: "Extra setup, e.g. apt-get install"}
+      base_branch:      {type: string, default: main}
+      max_issues:       {type: number, default: 3}
+      model:            {type: string, default: opus}
+      max_turns:        {type: number, default: 60}
+      timeout_minutes:  {type: number, default: 60}
+      claude_version:   {type: string, default: "2.1.331"}
+      loop_ref:         {type: string, default: main}
+      loop_repo:        {type: string, default: tonhe/agent-loop}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: {required: true}
+      AGENT_PAT:               {required: true}
+      DISCORD_WEBHOOK_URL:     {required: false}
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      issues: ${{ steps.pick.outputs.issues }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", persist-credentials: false}
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          MAX_ISSUES: ${{ inputs.max_issues }}
+        run: |
+          issues=$(bash scripts/select-issues.sh "${{ inputs.mode }}" "${{ inputs.issue }}")
+          echo "Selected: $issues"
+          echo "issues=$issues" >> "$GITHUB_OUTPUT"
+
+  work:
+    needs: select
+    if: needs.select.outputs.issues != '[]' && needs.select.outputs.issues != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # outer backstop; the real limit is timeout_minutes around Claude
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        issue: ${{ fromJSON(needs.select.outputs.issues) }}
+    env:
+      N: ${{ matrix.issue }}
+      OWNER_LOGIN: ${{ inputs.owner_login }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.base_branch }}", persist-credentials: false, fetch-depth: 1}
+
+      - name: Load agent-loop scripts outside the workspace
+        uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+      - run: |
+          mv .agent-loop-src "$RUNNER_TEMP/agent-loop" && chmod +x "$RUNNER_TEMP"/agent-loop/scripts/*.sh
+          mkdir -p "$RUNNER_TEMP/out"
+          echo "{\"issue\": $N, \"status\": \"error\", \"summary\": \"workflow failed before Claude finished\"}" > "$RUNNER_TEMP/out/record.json"
+
+      - if: inputs.go_version_file != ''
+        uses: actions/setup-go@v5
+        with: {go-version-file: "${{ inputs.go_version_file }}"}
+      - if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
+      - run: npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
+
+      - name: Claim issue
+        env: {GH_TOKEN: "${{ secrets.AGENT_PAT }}"}
+        run: |
+          gh issue edit "$N" -R "$GITHUB_REPOSITORY" --add-label agent:in-progress
+          gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:urgent 2>/dev/null || true
+
+      - name: Build prompt (issue body + owner comments only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFY_COMMAND: ${{ inputs.verify_command }}
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
+        run: |
+          L="$RUNNER_TEMP/agent-loop"
+          { "$L/scripts/render-prompt.sh" "$L/prompts/dev.md"; echo
+            "$L/scripts/issue-context.sh" "$N"; } > "$RUNNER_TEMP/prompt.md"
+
+      # Only the Claude token is in this step's environment. No PAT, no GitHub token,
+      # and the checkout has no stored credentials.
+      - name: Claude works the issue
+        id: claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+          ALLOWED_TOOLS: "Read,Grep,Glob,Edit,Write,Bash(git diff:*),Bash(git status:*),Bash(git log:*),${{ inputs.bash_allow }}"
+        run: |
+          set +e
+          "$RUNNER_TEMP/agent-loop/scripts/run-claude.sh" "$RUNNER_TEMP/prompt.md" \
+            "$RUNNER_TEMP/agent-loop/schemas/dev-result.json" "$RUNNER_TEMP/claude"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      # Agent-written code runs here (tests), so this step gets no secrets at all.
+      - name: Check diff and verify
+        id: check
+        env:
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
+          VERIFY_COMMAND: ${{ inputs.verify_command }}
+          RC: ${{ steps.claude.outputs.rc }}
+        run: |
+          L="$RUNNER_TEMP/agent-loop"; C="$RUNNER_TEMP/claude"
+          status=$(jq -r '.status // "error"' "$C/result.json" 2>/dev/null || echo error)
+          reason=""
+          if [[ "$RC" == "124" || "$RC" == "3" || "$status" == "too_big" ]]; then
+            status=too_big; reason="too big for one unattended run. Consider splitting it."
+          elif [[ "$RC" != "0" ]]; then
+            status=error; reason="Claude exited with an error (code $RC)."
+          elif [[ "$status" == "blocked" ]]; then
+            reason="blocked."
+          else
+            set +e; bash "$L/scripts/check-diff.sh"; d=$?; set -e
+            if [[ $d -eq 2 ]]; then status=no_change; reason="reported done but changed nothing."
+            elif [[ $d -ne 0 ]]; then status=rejected; reason="changed protected files; the change was discarded."
+            else
+              git diff --cached --binary > "$RUNNER_TEMP/change.patch"
+              if ! bash -c "$VERIFY_COMMAND" > "$RUNNER_TEMP/verify.log" 2>&1; then
+                tail -40 "$RUNNER_TEMP/verify.log"
+                status=verify_failed; reason="\`$VERIFY_COMMAND\` failed when the workflow re-ran it."
+              else
+                status=ok
+              fi
+            fi
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+
+      # Publish from a fresh checkout so nothing the agent wrote into .git (hooks, config) runs.
+      - name: Clean checkout for publishing
+        if: steps.check.outputs.status == 'ok'
+        uses: actions/checkout@v4
+        with: {ref: "${{ inputs.base_branch }}", path: .publish, persist-credentials: false, fetch-depth: 1}
+
+      - name: Publish PR or hand back
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          PUSH_TOKEN: ${{ secrets.AGENT_PAT }}
+          GIT_AUTHOR_NAME: ${{ inputs.git_author_name }}
+          GIT_AUTHOR_EMAIL: ${{ inputs.git_author_email }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          STATUS: ${{ steps.check.outputs.status }}
+          REASON: ${{ steps.check.outputs.reason }}
+        run: |
+          L="$RUNNER_TEMP/agent-loop"; C="$RUNNER_TEMP/claude"; R="$RUNNER_TEMP/out/record.json"
+          summary=$(jq -r '.summary // ""' "$C/result.json" 2>/dev/null || echo "")
+          detail=$(jq -r '.split_suggestion // ""' "$C/result.json" 2>/dev/null || echo "")
+          pr=""; status="${STATUS:-error}"
+          if [[ "$status" == "ok" ]]; then
+            cd .publish
+            git apply --index "$RUNNER_TEMP/change.patch"
+            pr=$(bash "$L/scripts/publish-pr.sh" "$N" "$C/result.json")
+            status=pr_opened
+            cd ..
+          else
+            gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:ready --add-label needs:human
+            gh issue comment "$N" -R "$GITHUB_REPOSITORY" --body "$(printf '<!-- agent-dev -->\n**Dev agent stopped:** %s\n\n%s\n\n%s\n\nRun: %s' \
+              "${REASON:-workflow error}" "$summary" "$detail" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+          fi
+          usage='{}'; [[ -s "$C/usage.json" ]] && usage=$(cat "$C/usage.json")
+          jq -n --argjson n "$N" --arg s "$status" --arg sum "$summary" --arg pr "$pr" --argjson u "$usage" \
+            '{issue: $n, status: $s, summary: $sum, pr: $pr, usage: $u}' > "$R"
+          cat "$R"
+
+      - name: Release claim
+        if: always()
+        env: {GH_TOKEN: "${{ secrets.AGENT_PAT }}"}
+        run: gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:in-progress || true
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: "agent-record-${{ matrix.issue }}", path: "${{ runner.temp }}/out/record.json", retention-days: 14}
+
+  digest:
+    needs: [select, work]
+    if: always() && needs.select.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", persist-credentials: false}
+      - uses: actions/download-artifact@v4
+        with: {pattern: "agent-record-*", path: records, merge-multiple: false}
+        continue-on-error: true
+      - env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ISSUES: ${{ needs.select.outputs.issues }}
+          MODE: ${{ inputs.mode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "**Dev agent: ${GITHUB_REPOSITORY#*/}** ($MODE)"
+            if [[ "$ISSUES" == "[]" ]]; then echo "No issues were ready."; fi
+            for f in records/*/record.json; do
+              [[ -f "$f" ]] || continue
+              jq -r '"- #\(.issue): \(.status)" + (if .pr != "" then " <\(.pr)>" else "" end)
+                     + (if .usage.num_turns then " (\(.usage.num_turns) turns, \((.usage.duration_ms // 0)/60000 | floor) min)" else "" end)
+                     + (if .summary != "" then "\n  \(.summary)" else "" end)' "$f"
+            done
+            echo "<$RUN_URL>"
+          } | tee -a "$GITHUB_STEP_SUMMARY" | bash scripts/discord.sh
