@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Validate the backlog plan and apply what passes. Prints a Markdown digest to stdout.
-# Usage: apply-backlog.sh WORK_DIR   (expects candidates.json, current-labels.json, external.json, claude/result.json)
+# Usage: apply-backlog.sh WORK_DIR   (expects candidates.json, current-labels.json, external.json, claude/result.json;
+#                                     planning.json from plan-due.sh is optional)
+# When planning.json says a milestone plan is due and the plan carries a proposal, the
+# "Plan vX.Y" issue is filed as the owner: body rendered by lib/planning.jq (plan_body),
+# label needs:human and nothing else, no milestone. Nothing here ever sets a milestone.
 # Env:   GH_TOKEN (the PAT, so changes appear as the owner), GITHUB_REPOSITORY,
 #        ALLOW_MEDIUM_RISK (true|false), DRY_RUN (true|false), MAX_NEW_ISSUES
 # Exit:  0 ok, 5 there were candidates but the plan applied nothing (digest is still printed).
@@ -76,6 +80,30 @@ while read -r a; do
   digest+=("- #$n${label_note:- assessed}")
 done < <(jq -c '.apply[]' "$w/validated.json")
 
+# Milestone planning: propose only. The title comes from plan-due.sh, the body from
+# plan_body (model text reduced to single lines, Base: lines defanged, only issues that
+# were offered), the label is fixed.
+plan_line=""
+if [[ -s "$w/planning.json" && $(jq -r '.due' "$w/planning.json") == true ]]; then
+  ptitle=$(jq -r '.title' "$w/planning.json")
+  if ! [[ "$ptitle" =~ ^Plan\ v[0-9]+\.[0-9]+$ ]]; then
+    plan_line="- planning: unexpected plan title; nothing filed"
+  elif ! jq -e '(.planning // null) | type == "object"' "$w/claude/result.json" >/dev/null 2>&1; then
+    plan_line="- planning: \`$ptitle\` was due but the plan carried no proposal; it will be asked for again next run"
+  else
+    jq -r -L "$here/lib" --slurpfile p "$w/planning.json" 'include "planning"; .planning | plan_body($p[0])' \
+      "$w/claude/result.json" > "$w/plan-body.md"
+    if [[ $dry == true ]]; then
+      echo "DRY: create issue '$ptitle' (needs:human, assigned to $OWNER_LOGIN)" >&2
+      plan_line="- planning: would open \`$ptitle\` (dry run)"
+    elif url=$(gh issue create -R "$repo" --title "$ptitle" --body-file "$w/plan-body.md" --label needs:human --assignee "$OWNER_LOGIN"); then
+      plan_line="- planning: opened #${url##*/} \`$ptitle\` for you to answer"
+    else
+      plan_line="- planning: could not open \`$ptitle\`; see the log"
+    fi
+  fi
+fi
+
 rejected=$(jq -r '.rejected[] | "- #\(.issue): \(.reason)"' "$w/validated.json")
 external=$(jq -r 'if length == 0 then "none" else map("#\(.number) by \(.author)") | join(", ") end' "$w/external.json")
 
@@ -96,6 +124,7 @@ if (( n_cand > 0 && n_apply == 0 )); then empty_plan=true; fi
     echo "**FAILED: the plan had no usable actions for $n_cand candidate issue(s). Nothing was applied.**"
   elif (( ${#digest[@]} )); then printf '%s\n' "${digest[@]}"
   else echo "- nothing needed assessment"; fi
+  [[ -n $plan_line ]] && echo "$plan_line"
   [[ -n $unanswered && $empty_plan == false ]] && echo "No action returned for: $unanswered"
   [[ -n $rejected ]] && { echo "Rejected by guardrails:"; echo "$rejected"; }
   [[ -s "$w/blocked.json" ]] && echo "Waiting on blockers: $(jq -r 'length' "$w/blocked.json") issue(s)"

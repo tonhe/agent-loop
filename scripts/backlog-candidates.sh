@@ -8,7 +8,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 out=$1; mkdir -p "$out"
 
 gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 200 \
-  --json number,title,body,labels,author,createdAt,comments > "$out/all.json"
+  --json number,title,body,labels,author,createdAt,comments,milestone > "$out/all.json"
 
 open=$(jq -c '[.[].number]' "$out/all.json")
 # Native dependencies; {} with a warning if the API is unavailable.

@@ -13,6 +13,9 @@ on:
       max_new_issues:   {type: number, default: 10}
       allow_medium_risk: {type: boolean, default: false}
       dry_run:          {type: boolean, default: false, description: "Plan only; change nothing"}
+      release_issues:   {type: boolean, default: true, description: "Open or refresh a 'Release vX.Y.Z' issue when a release is due. Never tags."}
+      milestone_planning: {type: boolean, default: true, description: "Open a 'Plan vX.Y' proposal issue when the active milestone runs low. Never changes milestones."}
+      roadmap_path:     {type: string, default: ROADMAP.md, description: "Roadmap file the planning proposal reads its next epic from, if it exists"}
       claude_version:   {type: string, default: "2.1.331"}
       loop_ref:         {type: string, default: main, description: "Ref of tonhe/agent-loop to load scripts from; match the @ref you call"}
       loop_repo:        {type: string, default: tonhe/agent-loop}
@@ -39,27 +42,46 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
           MAX_CANDIDATES: ${{ inputs.max_candidates }}
+          PLANNING: ${{ inputs.milestone_planning }}
+          ROADMAP_PATH: ${{ inputs.roadmap_path }}
         run: |
           W="$RUNNER_TEMP/work"
           "$RUNNER_TEMP/agent-loop/scripts/backlog-candidates.sh" "$W"
-          echo "count=$(jq length "$W/candidates.json")" >> "$GITHUB_OUTPUT"
+          count=$(jq length "$W/candidates.json")
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          # Milestone planning: a script decides whether a proposal is due (lib/planning.jq).
+          # Claude then runs even with no issue to triage.
+          plan_due=false
+          if [[ "$PLANNING" == true ]]; then
+            "$RUNNER_TEMP/agent-loop/scripts/plan-due.sh" "$W" \
+              || echo "::warning::Planning check failed; milestone planning is off for this run."
+            if [[ -s "$W/planning.json" ]]; then plan_due=$(jq -r '.due' "$W/planning.json"); fi
+          fi
+          echo "plan_due=$plan_due" >> "$GITHUB_OUTPUT"
+          if [[ "$count" != 0 || "$plan_due" == true ]]; then echo "work=true" >> "$GITHUB_OUTPUT"
+          else echo "work=false" >> "$GITHUB_OUTPUT"; fi
         id: gather
 
       - name: Install Claude Code
-        if: steps.gather.outputs.count != '0'
+        if: steps.gather.outputs.work == 'true'
         run: npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
 
       - name: Build prompt
-        if: steps.gather.outputs.count != '0'
+        if: steps.gather.outputs.work == 'true'
         env:
           VERIFY_COMMAND: ${{ inputs.verify_command }}
         run: |
           L="$RUNNER_TEMP/agent-loop"; W="$RUNNER_TEMP/work"
           { "$L/scripts/render-prompt.sh" "$L/prompts/backlog.md"
             echo; echo '```json'; cat "$W/candidates.json"; echo '```'; } > "$W/prompt.md"
+          # Only when plan-due.sh said so. The facts hold the owner's own issues only.
+          if [[ -s "$W/planning.json" && $(jq -r '.due' "$W/planning.json") == true ]]; then
+            { echo; echo "## Milestone planning facts"; echo
+              echo '```json'; jq '.facts' "$W/planning.json"; echo '```'; } >> "$W/prompt.md"
+          fi
 
       - name: Claude proposes a plan (read-only tools)
-        if: steps.gather.outputs.count != '0'
+        if: steps.gather.outputs.work == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           MODEL: ${{ inputs.model }}
@@ -71,7 +93,7 @@ jobs:
           "$L/scripts/run-claude.sh" "$W/prompt.md" "$L/schemas/backlog-plan.json" "$W/claude"
 
       - name: Enforce and apply plan
-        if: steps.gather.outputs.count != '0'
+        if: steps.gather.outputs.work == 'true'
         env:
           GH_TOKEN: ${{ secrets.AGENT_PAT }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
@@ -84,10 +106,31 @@ jobs:
           cat "$W/digest.md" >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
+      # Release issue: independent of triage, so it runs even when triage had nothing to do
+      # or failed. It opens or edits one issue as the owner. It never tags, never creates
+      # a GitHub release and never approves a deployment (scripts/release-issue.sh).
+      - name: Release issue (propose only)
+        if: ${{ !cancelled() && inputs.release_issues }}
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          W="$RUNNER_TEMP/work"; mkdir -p "$W"
+          if "$RUNNER_TEMP/agent-loop/scripts/release-issue.sh" "$W" > "$W/release.txt"; then
+            cat "$W/release.txt"
+          else
+            cat "$W/release.txt"
+            echo "::warning::Release check failed; see the log."
+            echo "Release check: failed; see the run log." > "$W/release.txt"
+          fi
+          { echo; cat "$W/release.txt"; } >> "$GITHUB_STEP_SUMMARY"
+
       # Keep what Claude proposed and what the guardrails let through, so a run that
       # applies nothing can be explained afterwards.
       - name: Record the plan
-        if: always() && steps.gather.outputs.count != '0'
+        if: always() && steps.gather.outputs.work == 'true'
         run: |
           W="$RUNNER_TEMP/work"
           for f in claude/usage.json claude/result.json validated.json; do
@@ -97,7 +140,7 @@ jobs:
               jq . "$W/$f"; echo '`````'; echo; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
           done
       - name: Upload the plan
-        if: always() && steps.gather.outputs.count != '0'
+        if: always() && steps.gather.outputs.work == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: backlog-plan
@@ -107,6 +150,8 @@ jobs:
             ${{ runner.temp }}/work/candidates.json
             ${{ runner.temp }}/work/blocked.json
             ${{ runner.temp }}/work/validated.json
+            ${{ runner.temp }}/work/planning.json
+            ${{ runner.temp }}/work/plan-body.md
             ${{ runner.temp }}/work/digest.md
             ${{ runner.temp }}/work/claude/result.json
             ${{ runner.temp }}/work/claude/usage.json

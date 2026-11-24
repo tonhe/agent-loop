@@ -4,6 +4,68 @@
   "required": ["actions", "summary"],
   "properties": {
     "summary": {"type": "string", "description": "Two or three sentences for the nightly digest."},
+    "planning": {
+      "type": ["object", "null"],
+      "description": "Milestone planning proposal. Only when the prompt ends with a 'Milestone planning facts' section; otherwise null or left out.",
+      "additionalProperties": false,
+      "required": ["summary", "features", "stretch", "move_out"],
+      "properties": {
+        "summary": {"type": "string", "description": "Two or three plain sentences: the shape of the proposed version."},
+        "epic": {
+          "type": ["object", "null"],
+          "description": "The next epic from the roadmap file named in the facts; null when the facts name no roadmap.",
+          "additionalProperties": false,
+          "required": ["title", "size", "recommendation"],
+          "properties": {
+            "title": {"type": "string"},
+            "size": {"type": "string", "description": "One line."},
+            "recommendation": {"type": "string", "description": "One line."}
+          }
+        },
+        "features": {
+          "type": "array",
+          "description": "Up to 5 issues from facts.unmilestoned, best value for size first.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue", "size", "recommendation"],
+            "properties": {
+              "issue": {"type": "integer", "description": "An issue number from the matching list in the planning facts."},
+              "size": {"type": "string", "description": "One line: rough size, e.g. 'S: one package, about 30 minutes'."},
+              "recommendation": {"type": "string", "description": "One line: what to do with it and why."}
+            }
+          }
+        },
+        "stretch": {
+          "type": "array",
+          "description": "Issues from facts.stretch worth promoting.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue", "size", "recommendation"],
+            "properties": {
+              "issue": {"type": "integer", "description": "An issue number from the matching list in the planning facts."},
+              "size": {"type": "string", "description": "One line: rough size, e.g. 'S: one package, about 30 minutes'."},
+              "recommendation": {"type": "string", "description": "One line: what to do with it and why."}
+            }
+          }
+        },
+        "move_out": {
+          "type": "array",
+          "description": "Issues from facts.active_milestone.open_issues that should leave the milestone.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue", "size", "recommendation"],
+            "properties": {
+              "issue": {"type": "integer", "description": "An issue number from the matching list in the planning facts."},
+              "size": {"type": "string", "description": "One line: rough size, e.g. 'S: one package, about 30 minutes'."},
+              "recommendation": {"type": "string", "description": "One line: what to do with it and why."}
+            }
+          }
+        }
+      }
+    },
     "actions": {
       "type": "array",
       "items": {
