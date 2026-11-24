@@ -24,11 +24,11 @@ sel_in='{
  "prs": [{"number": 100, "body": "Closes #7\n<!-- agent-loop issue=7 -->"}, {"number": 101, "body": null}]
 }'
 check "select: owner-only, skips in-progress/needs-human/open-PR, oldest first, max 3" \
-  "[2,5,8]" "$(jq -c --arg owner tonhe --argjson max 3 -f "$root/lib/select.jq" <<<"$sel_in")"
+  "[2,5,8]" "$(jq -c --arg owner tonhe --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
 check "select: max respected" \
-  "[2]" "$(jq -c --arg owner tonhe --argjson max 1 -f "$root/lib/select.jq" <<<"$sel_in")"
+  "[2]" "$(jq -c --arg owner tonhe --argjson max 1 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
 check "select: other owner sees only their issue" \
-  "[3]" "$(jq -c --arg owner mallory --argjson max 3 -f "$root/lib/select.jq" <<<"$sel_in")"
+  "[3]" "$(jq -c --arg owner mallory --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
 
 # ---------- candidates.jq ----------
 cand_in='[
@@ -46,9 +46,32 @@ cand_in='[
   "comments": [{"author": {"login": "mallory"}, "body": "<!-- agent-assessment -->", "createdAt": "2026-01-02T00:00:00Z"}]}
 ]'
 check "candidates: new, owner-replied, fake-marker; not assessed/stranger/external" \
-  "[1,3,6]" "$(jq -c --arg owner tonhe --argjson max 25 -f "$root/lib/candidates.jq" <<<"$cand_in" | jq -c 'map(.number)')"
+  "[1,3,6]" "$(jq -c --arg owner tonhe --argjson max 25 --argjson open "[]" -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$cand_in" | jq -c 'map(.number)')"
 check "candidates: stranger comments never included" \
-  "0" "$(jq -c --arg owner tonhe --argjson max 25 -f "$root/lib/candidates.jq" <<<"$cand_in" | jq '[.. | strings | select(contains("ignore previous"))] | length')"
+  "0" "$(jq -c --arg owner tonhe --argjson max 25 --argjson open "[]" -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$cand_in" | jq '[.. | strings | select(contains("ignore previous"))] | length')"
+
+
+# ---------- blocked.jq (phrasings taken from real viaduct issues) ----------
+bl() { jq -rn -L "$root/lib" --arg b "$1" 'include "blocked"; $b | blockers | map(tostring) | join(",")'; }
+check "blocked: bold quote form"            "4"   "$(bl '> **Blocked by #4.** The code this refers to is on the branch.')"
+check "blocked: part-of plus blocked"       "4"   "$(bl 'Part of #5. Blocked by #4.')"
+check "blocked: two refs in one sentence"   "4,6" "$(bl 'Part of #6. Blocked by the agent-mode design issue under #6, and by #4.')"
+check "blocked: prose blocker w/o number -> unknown" "-1" "$(bl 'Blocked by the agent implementation issue.')"
+check "blocked: negated"                    ""    "$(bl 'The package is identical, so this is not blocked by #4.')"
+check "blocked: after #N merges"            "4"   "$(bl 'Do this after #4 merges, or on that branch.')"
+check "blocked: quoted phrase is not a blocker" "" "$(bl '- [ ] Issues marked \"Blocked by\" this one are unblocked')"
+check "blocked: unrelated #refs ignored"    ""    "$(bl 'See #12 for context. Related to #4.')"
+ib() { jq -rn -L "$root/lib" --arg b "$1" --argjson open "$2" 'include "blocked"; $b | is_blocked($open)'; }
+check "is_blocked: blocker open"   "true"  "$(ib 'Blocked by #4.' '[4,5]')"
+check "is_blocked: blocker closed" "false" "$(ib 'Blocked by #4.' '[5]')"
+check "is_blocked: unknown blocker stays blocked" "true" "$(ib 'Blocked by the design issue.' '[]')"
+sel_b='{"issues":[{"number":20,"createdAt":"2026-01-01T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"}],"body":"> **Blocked by #4.**"},
+ {"number":21,"createdAt":"2026-01-02T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"}],"body":"Fine to do now."}],"prs":[]}'
+check "select: blocked issue skipped while #4 open" "[21]" "$(jq -c --arg owner tonhe --argjson max 3 --argjson open '[4,20,21]' -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_b")"
+check "select: picked up once #4 closes" "[20,21]" "$(jq -c --arg owner tonhe --argjson max 3 --argjson open '[20,21]' -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_b")"
+cand_b='[{"number":20,"title":"t","body":"Blocked by #4.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":21,"title":"t","body":"ok","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}]'
+check "candidates: blocked issue not sent to Claude" "[21]" "$(jq -c --arg owner tonhe --argjson max 25 --argjson open '[4,20,21]' -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$cand_b" | jq -c 'map(.number)')"
 
 # ---------- validate-plan.jq ----------
 vp() { jq -c --argjson allowed '[1,2,3,4,5]' --argjson current "$1" --argjson allow_medium "${3:-false}" -f "$root/lib/validate-plan.jq" <<<"$2"; }
