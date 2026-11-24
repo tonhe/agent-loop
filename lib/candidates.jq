@@ -6,13 +6,19 @@
 # An issue needs assessment when it has no assessment comment yet, or the
 # owner commented after the last assessment (comment "/reassess" to force it).
 include "blocked";
+include "meta";
 # Blocked issues are skipped entirely; they become candidates once their blockers close.
+# The Release and Plan issues the loop files itself (lib/meta.jq) are never candidates:
+# their bodies are built from commit messages or written by the model, and what happens
+# to them is the owner's decision. Not being candidates, they are also outside the
+# allowed set of validate-plan.jq, so no plan can label them.
 def is_assessment: (.body // "") | contains("<!-- agent-assessment -->");
 
 ($ARGS.named.native // {}) as $native
 | [ .[]
   | select(.author.login == $owner)
   | select(issue_blocked($open; $native) | not)
+  | select(is_meta_issue | not)
   | . as $i
   | ([.comments[] | select(.author.login == $owner and is_assessment)] | last) as $a
   | ([.comments[] | select(.author.login == $owner and (is_assessment | not))]) as $mine

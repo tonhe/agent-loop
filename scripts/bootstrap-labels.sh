@@ -20,4 +20,7 @@ agent:in-progress|5319e7|An agent is working on this now
 agent:urgent|b60205|Owner-applied: run the dev agent on this now
 needs:human|e99695|Owner must decide or clarify
 agent:found|c2e0c6|Filed by the dev agent from something it noticed
+agent:paired|0b6e99|Owned by the owner's interactive agent; the loop leaves it alone
+release|0052cc|Release proposal filed by the backlog run; the owner tags
+stretch|d4c5f9|Owner-applied: nice to have; milestone planning may propose promoting it
 EOF
