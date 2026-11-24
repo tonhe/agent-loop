@@ -19,4 +19,5 @@ agent:ready|1d76db|An unattended agent may pick this up
 agent:in-progress|5319e7|An agent is working on this now
 agent:urgent|b60205|Owner-applied: run the dev agent on this now
 needs:human|e99695|Owner must decide or clarify
+agent:found|c2e0c6|Filed by the dev agent from something it noticed
 EOF
