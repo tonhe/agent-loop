@@ -16,7 +16,8 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 
 | Guardrail | Enforced by |
 |---|---|
-| Blocked issues wait: "Blocked by #N" (or "after #N merges") while #N is open, or a blocker with no number, keeps an issue out of triage and dev | `lib/blocked.jq` |
+| Blocked issues wait: "Blocked by #N" (or "after #N merges") while #N is open, a blocker with no number, or an open blocker in GitHub's native issue dependencies keeps an issue out of triage and dev | `lib/blocked.jq`, `lib/native-blockers.jq`, `native-blockers.sh` |
+| A per-issue base branch must be a plain branch name that already exists; anything else hands the issue back | `lib/base.jq`, `resolve-base.sh` |
 | Only the owner's issues are ever shown to Claude | `select-issues.sh`, `issue-context.sh`, `lib/candidates.jq` (author check) |
 | Other people's comments never reach Claude | `issue-context.sh`, `review-context.sh` (owner, CodeRabbit, github-actions only) |
 | Backlog manager can't do anything directly | Read-only tools; returns JSON that `lib/validate-plan.jq` filters |
@@ -27,7 +28,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | "Done" means verified | Workflow re-runs `verify_command` itself in a step with no secrets |
 | Agent code never runs next to the PAT | Verify step has no secrets; publish step applies a patch in a fresh checkout with hooks disabled |
 | One fix round only | Marker comment posted before the round starts (`lib/followup.jq`) |
-| Auto-merge can't skip checks | `enable-automerge.sh` refuses unless main has required checks and an empty bypass list |
+| Auto-merge can't skip checks | `enable-automerge.sh` refuses unless the PR's own base branch has required checks and an empty bypass list |
 | Releases need a human | `environment: release` with you as required reviewer; PAT has no Deployments permission |
 | Digest can't ping anyone | `discord.sh` sets `allowed_mentions.parse = []` |
 
@@ -71,10 +72,48 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 - **Rough idea:** file an issue. The backlog run expands it, asks questions, or splits it.
 - **Answering questions:** comment on the issue. Any comment from you triggers reassessment the next night. Comment `/reassess` to force it.
 - **Urgent:** add the `agent:urgent` label, or `gh workflow run agent-dev.yml -f issue=N`.
-- **Dependencies:** write `Blocked by #N.` in the issue. It's skipped until #N closes. `not blocked by #N` and a quoted "Blocked by" are ignored. A manual run (`-f issue=N`) overrides it.
+- **Dependencies:** write `Blocked by #N.` in the issue, or mark it as blocked in the issue sidebar (GitHub's native issue dependencies). Either one is enough: the issue is skipped by triage and dev until every such blocker is closed. `not blocked by #N` and a quoted "Blocked by" are ignored. A manual run (`-f issue=N`) overrides both.
+- **Base branch:** to have an issue worked on a branch other than the default, put `Base: feat/my-branch` on a line of its own in the issue body, or add a label `base:feat/my-branch`. See "Per-issue base branch" below.
+- **Milestones:** the nightly dev run takes ready issues from the most pressing open milestone first. See "Order of work" below.
 - **Someone else's issue:** file your own issue that links to theirs. The loop never works external issues.
 - **Found issues:** problems the dev agent notices but doesn't fix get filed as new issues (as you, labeled `agent:found`, max 3 per worked issue, duplicates by title skipped) and go through normal triage.
 - **Stopped work:** issues the agent gives up on get `needs:human` and a comment saying why. Too-big issues get a split suggestion.
+
+## Dependencies
+
+Two sources, and an issue is blocked if either says so:
+
+- **Text:** `Blocked by #N` / `after #N merges` in the issue body (`lib/blocked.jq`).
+- **Native:** GitHub's issue dependencies. `native-blockers.sh` reads `blockedBy` for all open issues in one paginated GraphQL query and `lib/native-blockers.jq` reduces it to `{"<issue>": [open blocker numbers]}`, which the selection filters take as `--argjson native`. Closed blockers do not count. A blocker in another repository counts while it is open.
+
+If the dependencies query fails (API unavailable, token cannot read it), the run logs a warning and carries on with the text form only. It does not fail, and it does not treat everything as blocked.
+
+## Per-issue base branch
+
+By default the dev agent checks out `base_branch` (default `main`), branches from it, and opens its PR against it. An issue can name another branch:
+
+- body line: `Base: feat/multi-target` (on its own line, backticks around the name allowed), or
+- label: `base:feat/multi-target`
+
+Rules, enforced by `lib/base.jq` and `resolve-base.sh` before anything is checked out:
+
+- **Precedence:** the body line wins over the label. Two different `Base:` lines, or two `base:` labels, are an error.
+- **Validation:** only plain branch names: letters, digits, `.`, `_`, `-`, `/`, starting with a letter or digit, at most 100 characters; no `..`, `//`, leading-dot or `.lock` components, trailing `/` or `.`, `HEAD`, or `refs/...`. A malformed value is an error; it never falls back to the label or the default.
+- **Existence:** the branch must already exist. The agent does not create base branches.
+- **On any error** the issue is handed back like other failures: `agent:ready` is replaced by `needs:human` and a comment says why. The digest shows `bad_base`.
+
+The PR is opened against that branch, and review and followup work from the PR's actual base: the review diff uses the PR's base commit, and `enable-automerge.sh` checks the ruleset of the PR's base branch. A feature branch without required status checks therefore never gets auto-merge; merge those PRs yourself.
+
+GitHub only acts on `Closes #N` when a PR merges into the default branch. When the base is another branch, the dev job removes `agent:ready` once the PR is open, so the issue is not worked a second time after the merge, and says so in the digest. Close the issue yourself when you merge; if triage marks it `agent:ready` again before you do, it will be worked again.
+
+## Order of work
+
+The nightly dev run picks up to `max_issues` ready issues in this order (`lib/select.jq`):
+
+1. Issues in the preferred milestone, oldest first.
+2. Everything else (other milestones and no milestone alike), oldest first.
+
+The preferred milestone is the open milestone with the earliest due date among those that have at least one ready, unblocked issue. Milestones with a due date come before those without; ties and undated milestones go by lowest milestone number. With no open milestones the order is simply oldest first.
 
 ## Adapting to another language
 
@@ -97,12 +136,14 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, candidate, plan-validation, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
+`bash test/run.sh` runs offline tests of the selection, candidate, dependency, base-branch, milestone, plan-validation, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
 
 ## Known limits and residual risk
 
 - The Claude token is in the environment while Claude runs tests it wrote. Only your own issues reach that step, so a hostile prompt would have to come from you. A leaked token costs usage, not code.
 - GitHub scheduled runs can start late under load.
+- Native dependencies are read up to 50 blockers per issue; an issue with more is treated as blocked.
+- A PR against a non-default base does not close its issue on merge (see "Per-issue base branch").
 - Cron times are UTC; Eastern times shift by an hour at DST.
 - `make golden-update` (or similar) lets the agent regenerate golden files. The review prompt checks for weakened tests, but read golden diffs yourself.
 - The fix round trusts CodeRabbit's comments as feedback. They are still treated as code feedback, never as instructions about credentials or CI.
