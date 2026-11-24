@@ -73,6 +73,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 - **Urgent:** add the `agent:urgent` label, or `gh workflow run agent-dev.yml -f issue=N`.
 - **Dependencies:** write `Blocked by #N.` in the issue. It's skipped until #N closes. `not blocked by #N` and a quoted "Blocked by" are ignored. A manual run (`-f issue=N`) overrides it.
 - **Someone else's issue:** file your own issue that links to theirs. The loop never works external issues.
+- **Found issues:** problems the dev agent notices but doesn't fix get filed as new issues (as you, labeled `agent:found`, max 3 per worked issue, duplicates by title skipped) and go through normal triage.
 - **Stopped work:** issues the agent gives up on get `needs:human` and a comment saying why. Too-big issues get a split suggestion.
 
 ## Adapting to another language

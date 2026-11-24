@@ -132,7 +132,7 @@ tmp=$(mktemp -d); (
   mkdir -p internal/x scripts .github/workflows && echo a > internal/x/a.go && echo m > Makefile && echo s > scripts/c.sh && echo w > .github/workflows/t.yml
   git add -A && git commit -qm init
 )
-cd "$tmp"
+cd "$tmp" || exit 1
 export PROTECTED_PATHS=$'Makefile\nscripts/'
 bash "$root/scripts/check-diff.sh" >/dev/null 2>&1; check "check-diff: no changes -> 2" "2" "$?"
 echo b >> internal/x/a.go
@@ -143,13 +143,51 @@ git checkout -q -- . 2>/dev/null; git reset -q --hard; echo z >> .github/workflo
 bash "$root/scripts/check-diff.sh" >/dev/null 2>&1; check "check-diff: .github always protected -> 1" "1" "$?"
 git reset -q --hard; echo new > Makefile.bak
 bash "$root/scripts/check-diff.sh" >/dev/null 2>&1; check "check-diff: Makefile.bak is not Makefile -> 0" "0" "$?"
-cd "$root"; rm -rf "$tmp"
+cd "$root" || exit 1; rm -rf "$tmp"
 
 # ---------- render-prompt.sh ----------
 out=$(VERIFY_COMMAND='make test-all' PROTECTED_PATHS=$'Makefile\nscripts/' bash "$root/scripts/render-prompt.sh" "$root/prompts/dev.md")
 check "render: verify command filled" "1" "$(grep -c 'Run `make test-all`' <<<"$out")"
 check "render: protected list filled" "1" "$(grep -c '`.github/`, `Makefile`, `scripts/`' <<<"$out")"
 check "render: no placeholders left" "0" "$(grep -c '{{' <<<"$out")"
+
+# ---------- file-found.sh and publish-pr.sh (stubbed gh/git) ----------
+stub=$(mktemp -d); mkdir -p "$stub/bin"
+cat > "$stub/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "$*" >> "$GHLOG"
+case "$1 $2" in
+  "issue list") printf '%s' "${OPEN_TITLES:-[]}" | jq -c 'map(ascii_downcase)' ;;  # real gh applies --jq
+  "issue create") echo "https://github.com/o/r/issues/$((RANDOM % 900 + 100))" ;;
+  "pr create") echo "https://github.com/o/r/pull/9" ;;
+esac
+GH
+cat > "$stub/bin/git" <<'GIT'
+#!/usr/bin/env bash
+echo "git $*" >> "$GHLOG"
+GIT
+chmod +x "$stub/bin/"*
+res="$stub/r.json"
+jq -n '{status:"done", summary:"s", found_issues:[
+  {title:"Export format is dropped on save", body:"config.go:121"},
+  {title:"Invalid export_format writes empty file", body:"tui.go:1846"},
+  {title:"README misses -o flag", body:"README"},
+  {title:"Fourth thing", body:"x"}]}' > "$res"
+out=$(PATH="$stub/bin:$PATH" GHLOG="$stub/log" GITHUB_REPOSITORY=o/r OPEN_TITLES='["Export format is dropped on save"]' MAX_FOUND=2 \
+      bash "$root/scripts/file-found.sh" 36 "$res" https://x/pull/43)
+check "found: duplicate title skipped" "1" "$(grep -c 'skipped (dup)' <<<"$out")"
+check "found: cap respected" "2" "$(grep -c '^gh issue create\|issue create' "$stub/log")"
+check "found: labeled agent:found and linked to source" "2" "$(grep -c -- '--label agent:found' "$stub/log")"
+check "found: none reported -> nothing filed" "" "$(PATH="$stub/bin:$PATH" GHLOG="$stub/log2" GITHUB_REPOSITORY=o/r bash "$root/scripts/file-found.sh" 36 <(echo '{"status":"done","summary":"s"}'))"
+
+jq -n '{commit_message:"docs: x", pr_title:"t", pr_body:"Closes #36.\n\n## What changed\n- thing\n\nCloses #36\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"}' > "$stub/p.json"
+: > "$stub/log3"
+PATH="$stub/bin:$PATH" GHLOG="$stub/log3" GITHUB_REPOSITORY=o/r GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t BASE_BRANCH=main PUSH_TOKEN=x \
+  bash "$root/scripts/publish-pr.sh" 36 "$stub/p.json" >/dev/null
+check "publish: attribution footer stripped" "0" "$(grep -ci 'generated with\|co-authored-by' "$stub/log3")"
+check "publish: exactly one Closes line" "1" "$(grep -ci '^Closes #36$' "$stub/log3")"
+check "publish: model body kept" "1" "$(grep -c 'What changed' "$stub/log3")"
+rm -rf "$stub"
 
 echo; echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]

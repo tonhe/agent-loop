@@ -1,13 +1,60 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "summary"],
+  "required": [
+    "status",
+    "summary"
+  ],
   "properties": {
-    "status": {"type": "string", "enum": ["done", "blocked", "too_big"]},
-    "summary": {"type": "string", "description": "One or two sentences on what changed or why it stopped."},
-    "commit_message": {"type": "string", "description": "Conventional one-line subject, optional body. No AI attribution."},
-    "pr_title": {"type": "string"},
-    "pr_body": {"type": "string", "description": "Markdown: what changed, how it was verified."},
-    "split_suggestion": {"type": "string", "description": "When too_big or blocked: how to split or what is needed."}
+    "status": {
+      "type": "string",
+      "enum": [
+        "done",
+        "blocked",
+        "too_big"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "One or two sentences on what changed or why it stopped."
+    },
+    "commit_message": {
+      "type": "string",
+      "description": "Conventional one-line subject, optional body. No AI attribution."
+    },
+    "pr_title": {
+      "type": "string"
+    },
+    "pr_body": {
+      "type": "string",
+      "description": "Markdown: what changed and how you verified it. No attribution lines, no 'Generated with' footer, no 'Closes #N' (the workflow adds it)."
+    },
+    "split_suggestion": {
+      "type": "string",
+      "description": "When too_big or blocked: how to split or what is needed."
+    },
+    "found_issues": {
+      "type": "array",
+      "maxItems": 5,
+      "description": "Real bugs or doc gaps you noticed but did not fix because they are out of scope. Only things you verified in the code.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "body"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Specific and short, like an issue title."
+          },
+          "body": {
+            "type": "string",
+            "description": "Markdown: what is wrong, evidence with file:line, and how to verify a fix."
+          }
+        }
+      }
+    }
   }
 }

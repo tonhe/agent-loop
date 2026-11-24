@@ -25,7 +25,11 @@ branch="issue-$n"
 git push -q --force "$remote" "HEAD:refs/heads/$branch"
 
 title=$(jq -r '.pr_title // empty' "$result"); [[ -z $title ]] && title=$(git log -1 --format=%s)
-body="$(jq -r '.pr_body // ""' "$result")
+# Strip any attribution footer or Closes line the model added; the workflow adds its own.
+model_body=$(jq -r '.pr_body // ""' "$result" \
+  | grep -viE '^[^a-z0-9]*generated with \[?claude|^co-authored-by:|^closes #[0-9]+[[:space:]]*$' \
+  | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+body="$model_body
 
 Closes #$n
 

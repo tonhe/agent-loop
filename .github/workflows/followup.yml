@@ -170,4 +170,6 @@ jobs:
             line="pushed fixes"
           elif [[ "$STATUS" == no_change ]]; then line="no changes needed"
           else line="stopped ($STATUS); left for you"; fi
+          found=$(bash "$L/scripts/file-found.sh" "$ISSUE" "$RUNNER_TEMP/claude/result.json" || true)
+          [[ -n "$found" ]] && summary+=$'\n'"New issues:"$'\n'"$found"
           echo "**Followup: ${GITHUB_REPOSITORY#*/}** PR #$PR: $line"$'\n'"$summary" | bash "$L/scripts/discord.sh"

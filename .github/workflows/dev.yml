@@ -18,6 +18,7 @@ on:
       setup_command:    {type: string, default: "", description: "Extra setup, e.g. apt-get install"}
       base_branch:      {type: string, default: main}
       max_issues:       {type: number, default: 3}
+      max_found:        {type: number, default: 3, description: "Max new issues the agent may file per worked issue"}
       model:            {type: string, default: opus}
       max_turns:        {type: number, default: 60}
       timeout_minutes:  {type: number, default: 60}
@@ -159,6 +160,7 @@ jobs:
           GIT_AUTHOR_NAME: ${{ inputs.git_author_name }}
           GIT_AUTHOR_EMAIL: ${{ inputs.git_author_email }}
           BASE_BRANCH: ${{ inputs.base_branch }}
+          MAX_FOUND: ${{ inputs.max_found }}
           STATUS: ${{ steps.check.outputs.status }}
           REASON: ${{ steps.check.outputs.reason }}
         run: |
@@ -177,9 +179,10 @@ jobs:
             gh issue comment "$N" -R "$GITHUB_REPOSITORY" --body "$(printf '<!-- agent-dev -->\n**Dev agent stopped:** %s\n\n%s\n\n%s\n\nRun: %s' \
               "${REASON:-workflow error}" "$summary" "$detail" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
           fi
+          found=$(bash "$L/scripts/file-found.sh" "$N" "$C/result.json" "$pr" || echo "- filing found issues failed; see log")
           usage='{}'; [[ -s "$C/usage.json" ]] && usage=$(cat "$C/usage.json")
-          jq -n --argjson n "$N" --arg s "$status" --arg sum "$summary" --arg pr "$pr" --argjson u "$usage" \
-            '{issue: $n, status: $s, summary: $sum, pr: $pr, usage: $u}' > "$R"
+          jq -n --argjson n "$N" --arg s "$status" --arg sum "$summary" --arg pr "$pr" --argjson u "$usage" --arg f "$found" \
+            '{issue: $n, status: $s, summary: $sum, pr: $pr, usage: $u, found: $f}' > "$R"
           cat "$R"
 
       - name: Release claim
@@ -215,7 +218,8 @@ jobs:
               [[ -f "$f" ]] || continue
               jq -r '"- #\(.issue): \(.status)" + (if .pr != "" then " <\(.pr)>" else "" end)
                      + (if .usage.num_turns then " (\(.usage.num_turns) turns, \((.usage.duration_ms // 0)/60000 | floor) min)" else "" end)
-                     + (if .summary != "" then "\n  \(.summary)" else "" end)' "$f"
+                     + (if .summary != "" then "\n  \(.summary)" else "" end)
+                     + (if (.found // "") != "" then "\n  New issues:\n" + (.found | split("\n") | map("  " + .) | join("\n")) else "" end)' "$f"
             done
             echo "<$RUN_URL>"
           } | tee -a "$GITHUB_STEP_SUMMARY" | bash scripts/discord.sh
