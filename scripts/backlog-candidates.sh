@@ -10,8 +10,14 @@ out=$1; mkdir -p "$out"
 gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 200 \
   --json number,title,body,labels,author,createdAt,comments > "$out/all.json"
 
-jq --arg owner "$OWNER_LOGIN" --argjson max "${MAX_CANDIDATES:-25}" \
-   -f "$here/lib/candidates.jq" "$out/all.json" > "$out/candidates.json"
+open=$(jq -c '[.[].number]' "$out/all.json")
+jq --arg owner "$OWNER_LOGIN" --argjson max "${MAX_CANDIDATES:-25}" --argjson open "$open" \
+   -L "$here/lib" -f "$here/lib/candidates.jq" "$out/all.json" > "$out/candidates.json"
+
+# Owner issues skipped because they are blocked (numbers only, for the digest).
+jq -c --arg owner "$OWNER_LOGIN" --argjson open "$open" -L "$here/lib" \
+   'include "blocked"; [.[] | select(.author.login == $owner and (.body | is_blocked($open))) | .number]' \
+   "$out/all.json" > "$out/blocked.json"
 
 # External issues: numbers and authors only. Titles are untrusted and stay out of the digest too.
 jq --arg owner "$OWNER_LOGIN" \
@@ -21,4 +27,4 @@ jq --arg owner "$OWNER_LOGIN" \
 jq '[.[] | {key: (.number | tostring), value: [.labels[].name]}] | from_entries' \
    "$out/all.json" > "$out/current-labels.json"
 
-echo "Candidates: $(jq length "$out/candidates.json"), external open issues: $(jq length "$out/external.json")"
+echo "Candidates: $(jq length "$out/candidates.json"), blocked: $(jq length "$out/blocked.json"), external open issues: $(jq length "$out/external.json")"

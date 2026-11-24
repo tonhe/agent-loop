@@ -83,5 +83,6 @@ external=$(jq -r 'if length == 0 then "none" else map("#\(.number) by \(.author)
   echo
   if (( ${#digest[@]} )); then printf '%s\n' "${digest[@]}"; else echo "- nothing needed assessment"; fi
   [[ -n $rejected ]] && { echo "Rejected by guardrails:"; echo "$rejected"; }
+  [[ -s "$w/blocked.json" ]] && echo "Waiting on blockers: $(jq -r 'length' "$w/blocked.json") issue(s)"
   echo "External issues waiting for you to adopt: $external"
 }

@@ -16,6 +16,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 
 | Guardrail | Enforced by |
 |---|---|
+| Blocked issues wait: "Blocked by #N" (or "after #N merges") while #N is open, or a blocker with no number, keeps an issue out of triage and dev | `lib/blocked.jq` |
 | Only the owner's issues are ever shown to Claude | `select-issues.sh`, `issue-context.sh`, `lib/candidates.jq` (author check) |
 | Other people's comments never reach Claude | `issue-context.sh`, `review-context.sh` (owner, CodeRabbit, github-actions only) |
 | Backlog manager can't do anything directly | Read-only tools; returns JSON that `lib/validate-plan.jq` filters |
@@ -70,6 +71,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 - **Rough idea:** file an issue. The backlog run expands it, asks questions, or splits it.
 - **Answering questions:** comment on the issue. Any comment from you triggers reassessment the next night. Comment `/reassess` to force it.
 - **Urgent:** add the `agent:urgent` label, or `gh workflow run agent-dev.yml -f issue=N`.
+- **Dependencies:** write `Blocked by #N.` in the issue. It's skipped until #N closes. `not blocked by #N` and a quoted "Blocked by" are ignored. A manual run (`-f issue=N`) overrides it.
 - **Someone else's issue:** file your own issue that links to theirs. The loop never works external issues.
 - **Stopped work:** issues the agent gives up on get `needs:human` and a comment saying why. Too-big issues get a split suggestion.
 

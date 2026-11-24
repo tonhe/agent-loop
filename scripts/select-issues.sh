@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Choose which issues the dev agent works on. Prints a JSON array of numbers.
 # Usage: select-issues.sh MODE [ISSUE]
-#   MODE=scheduled  owner-authored, agent:ready, not in progress, no open agent PR; oldest first
-#   MODE=manual     the given issue, if owner-authored and open (you running it is the approval)
+#   MODE=scheduled  owner-authored, agent:ready, not in progress, not blocked, no open agent PR; oldest first
+#   MODE=manual     the given issue, if owner-authored and open (you running it is the approval, blockers included)
 #   MODE=urgent     the given issue, if owner-authored, open, and labeled agent:urgent
 # Env: GH_TOKEN, GITHUB_REPOSITORY, OWNER_LOGIN, MAX_ISSUES
 set -euo pipefail
@@ -24,10 +24,11 @@ case "$mode" in
     ;;
   scheduled)
     issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --author "$OWNER_LOGIN" \
-               --label agent:ready --limit 100 --json number,labels,createdAt,author)
+               --label agent:ready --limit 100 --json number,labels,createdAt,author,body)
+    open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 500 --json number --jq '[.[].number]')
     prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 100 --json number,body)
     jq -nc --argjson issues "$issues" --argjson prs "$prs" '{issues: $issues, prs: $prs}' \
-      | jq -c --arg owner "$OWNER_LOGIN" --argjson max "${MAX_ISSUES:-3}" -f "$here/lib/select.jq"
+      | jq -c --arg owner "$OWNER_LOGIN" --argjson max "${MAX_ISSUES:-3}" --argjson open "$open" -L "$here/lib" -f "$here/lib/select.jq"
     ;;
   *) echo "::error::unknown mode $mode" >&2; exit 1 ;;
 esac
