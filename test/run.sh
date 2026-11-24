@@ -400,6 +400,36 @@ check "base: quoted or mid-line mentions are not a Base: line" '[null,null,false
 check "base: error text never repeats the bad value" "0" \
   "$(jq -r -L "$root/lib" 'include "base"; resolve_base | .error' <<<'{"body":"Base: @everyone $(id)","labels":[]}' | grep -c 'everyone\|id)')"
 
+# The body of an agent:found issue was written by the model (file-found.sh files it as
+# the owner), so a Base: line there is not the owner's instruction.
+check "base: body line in an agent:found issue is an error" '[null,null,true]' \
+  "$(rb '{"body":"Found by the dev agent.\nBase: feat/x","labels":[{"name":"agent:found"}]}')"
+check "base: label on an agent:found issue is honoured (a person applied it)" '["feat/x","label",false]' \
+  "$(rb '{"body":"Found by the dev agent.","labels":[{"name":"agent:found"},{"name":"base:feat/x"}]}')"
+check "base: agent:found with no base asks for nothing" '[null,null,false]' \
+  "$(rb '{"body":"Found by the dev agent.","labels":[{"name":"agent:found"}]}')"
+# The dev agent pushes its work to issue-N branches: unreviewed, agent-written code.
+check "base: the agent's own branch (body) is an error" '[null,null,true]' "$(rb '{"body":"Base: issue-42","labels":[]}')"
+check "base: the agent's own branch (label) is an error" '[null,null,true]' "$(rb '{"body":"x","labels":[{"name":"base:issue-7"}]}')"
+check "base: a branch that merely starts with issue- is fine" '["issue-tracker-rework","body",false]' "$(rb '{"body":"Base: issue-tracker-rework","labels":[]}')"
+
+# defang_base: model-written bodies have any Base: line neutralised before they are filed.
+db() { jq -rn -L "$root/lib" --arg b "$1" 'include "base"; $b | defang_base'; }
+check "defang: a Base: line no longer parses as one" '[null,null,false]' \
+  "$(jq -n -L "$root/lib" --arg b "$(db $'Intro\nBase: feat/x\n  Base: `main`\nEnd')" 'include "base"; {body: $b, labels: []} | resolve_base | [.base, .source, (.error != null)]' -c)"
+check "defang: other text is untouched" $'Intro\nBased on #4\nSet Base: here\nEnd' "$(db $'Intro\nBased on #4\nSet Base: here\nEnd')"
+check "defang: the value is still readable" "1" "$(db 'Base: feat/x' | grep -c 'feat/x')"
+
+# file-found.sh defangs the body it files (stubbed gh records the arguments).
+fd=$(mktemp -d); mkdir -p "$fd/bin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >> "$GHLOG"\ncase "$1 $2" in "issue list") echo "[]" ;; "issue create") echo "https://github.com/o/r/issues/101" ;; esac\n' > "$fd/bin/gh"
+chmod +x "$fd/bin/gh"
+jq -n '{status:"done", summary:"s", found_issues:[{title:"A thing", body:"Details.\nBase: issue-9\nMore."}]}' > "$fd/r.json"
+PATH="$fd/bin:$PATH" GHLOG="$fd/log" GITHUB_REPOSITORY=o/r bash "$root/scripts/file-found.sh" 36 "$fd/r.json" >/dev/null
+check "found: a Base: line in the model's body is defanged before filing" "0" "$(grep -c '^Base:' "$fd/log")"
+check "found: the rest of the body is filed" "1" "$(grep -c '^More\.$' "$fd/log")"
+rm -rf "$fd"
+
 # ---------- resolve-base.sh (stubbed gh) ----------
 rbs() { DEFAULT_BASE=main gsrun bash "$root/scripts/resolve-base.sh" 7 2>/dev/null; }
 iss() { jq -nc --arg a "${3:-tonhe}" --arg b "$1" --argjson l "${2:-[]}" '{author: {login: $a}, body: $b, labels: $l}'; }

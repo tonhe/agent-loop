@@ -100,6 +100,8 @@ Rules, enforced by `lib/base.jq` and `resolve-base.sh` before anything is checke
 - **Precedence:** the body line wins over the label. Two different `Base:` lines, or two `base:` labels, are an error.
 - **Validation:** only plain branch names: letters, digits, `.`, `_`, `-`, `/`, starting with a letter or digit, at most 100 characters; no `..`, `//`, leading-dot or `.lock` components, trailing `/` or `.`, `HEAD`, or `refs/...`. A malformed value is an error; it never falls back to the label or the default.
 - **Existence:** the branch must already exist. The agent does not create base branches.
+- **Not the agent's own branches:** `issue-N` branches hold the agent's unreviewed work and are refused as a base.
+- **Only your words count:** a `Base:` line is honoured because the issue body is yours. Bodies the model writes are not: found issues and split children have any `Base:` line rewritten to `Suggested base (not applied):` before they are filed, and a `Base:` line in the body of an `agent:found` issue is refused. To give such an issue a base, add a `base:<branch>` label.
 - **On any error** the issue is handed back like other failures: `agent:ready` is replaced by `needs:human` and a comment says why. The digest shows `bad_base`.
 
 The PR is opened against that branch, and review and followup work from the PR's actual base: the review diff uses the PR's base commit, and `enable-automerge.sh` checks the ruleset of the PR's base branch. A feature branch without required status checks therefore never gets auto-merge; merge those PRs yourself.
