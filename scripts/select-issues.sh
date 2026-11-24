@@ -1,25 +1,35 @@
 #!/usr/bin/env bash
 # Choose which issues the dev agent works on. Prints a JSON array of numbers.
 # Usage: select-issues.sh MODE [ISSUE]
-#   MODE=scheduled  owner-authored, agent:ready, not in progress, not blocked ("Blocked by #N" text or a
-#                   native dependency), no open agent PR; preferred milestone first, then oldest first
-#   MODE=manual     the given issue, if owner-authored and open (you running it is the approval, blockers included)
+#   MODE=scheduled  owner-authored, agent:ready, not in progress, not agent:paired, not blocked ("Blocked by #N"
+#                   text or a native dependency), no open agent PR; ordered by milestone group, then by
+#                   SELECTION_ORDER (lib/select.jq)
+#   MODE=manual     the given issue, if owner-authored and open (you running it is the approval: blockers
+#                   and agent:paired included)
 #   MODE=urgent     the given issue, if owner-authored, open, and labeled agent:urgent
-# Env: GH_TOKEN, GITHUB_REPOSITORY, OWNER_LOGIN, MAX_ISSUES
+#   In every mode the Release / Plan issues the loop files itself are refused (lib/meta.jq).
+# Env: GH_TOKEN, GITHUB_REPOSITORY, OWNER_LOGIN, MAX_ISSUES,
+#      SELECTION_ORDER (oldest | type; default oldest; anything else is an error)
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 mode=$1
 issue=${2:-}
+order=${SELECTION_ORDER:-oldest}
+if [[ "$order" != oldest && "$order" != type ]]; then
+  echo "::error::selection_order must be 'oldest' or 'type'." >&2
+  exit 1
+fi
 
 case "$mode" in
   manual|urgent)
     [[ "$issue" =~ ^[0-9]+$ ]] || { echo "::error::Need an issue number, got '$issue'" >&2; exit 1; }
-    data=$(gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json number,state,author,labels)
-    jq -e --arg owner "$OWNER_LOGIN" --arg mode "$mode" '
-      .state == "OPEN" and .author.login == $owner
+    data=$(gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json number,state,author,labels,body)
+    jq -e -L "$here/lib" --arg owner "$OWNER_LOGIN" --arg mode "$mode" '
+      include "meta";
+      .state == "OPEN" and .author.login == $owner and (is_meta_issue | not)
       and ($mode != "urgent" or ([.labels[].name] | index("agent:urgent") != null))
     ' <<<"$data" >/dev/null || {
-      echo "::error::Issue #$issue is not eligible (must be open, opened by $OWNER_LOGIN, and for urgent runs labeled agent:urgent)." >&2
+      echo "::error::Issue #$issue is not eligible (must be open, opened by $OWNER_LOGIN, not a Release or Plan issue filed by the loop, and for urgent runs labeled agent:urgent)." >&2
       echo '[]'; exit 0; }
     echo "[$issue]"
     ;;
@@ -37,7 +47,7 @@ case "$mode" in
       milestones='[]'; }
     jq -nc --argjson issues "$issues" --argjson prs "$prs" '{issues: $issues, prs: $prs}' \
       | jq -c --arg owner "$OWNER_LOGIN" --argjson max "${MAX_ISSUES:-3}" --argjson open "$open" \
-           --argjson native "$native" --argjson milestones "$milestones" -L "$here/lib" -f "$here/lib/select.jq"
+           --argjson native "$native" --argjson milestones "$milestones" --arg order "$order" -L "$here/lib" -f "$here/lib/select.jq"
     ;;
   *) echo "::error::unknown mode $mode" >&2; exit 1 ;;
 esac

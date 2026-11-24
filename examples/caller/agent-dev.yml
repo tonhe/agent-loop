@@ -31,6 +31,7 @@ jobs:
       git_author_email: you@example.com   # CHANGE: an email linked to your GitHub account
       verify_command: make test-all     # CHANGE: command that proves a change works
       go_version_file: go.mod          # CHANGE: drop for non-Go; use setup_command
+      # selection_order: type          # optional: bugs, then tech-debt, upkeep, features (default: oldest)
       bash_allow: >-
         Bash(go build:*),Bash(go test:*),Bash(go vet:*),Bash(gofmt:*),Bash(go mod tidy),
         Bash(make build),Bash(make test),Bash(make test-race),Bash(make test-tui),

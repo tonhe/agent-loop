@@ -18,6 +18,7 @@ on:
       setup_command:    {type: string, default: "", description: "Extra setup, e.g. apt-get install"}
       base_branch:      {type: string, default: main}
       max_issues:       {type: number, default: 3}
+      selection_order:  {type: string, default: oldest, description: "Scheduled runs: oldest (oldest first) or type (bugs, tech-debt, upkeep, features). Milestones rank above either."}
       max_found:        {type: number, default: 3, description: "Max new issues the agent may file per worked issue"}
       model:            {type: string, default: opus}
       max_turns:        {type: number, default: 60}
@@ -44,6 +45,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
           MAX_ISSUES: ${{ inputs.max_issues }}
+          SELECTION_ORDER: ${{ inputs.selection_order }}
         run: |
           issues=$(bash scripts/select-issues.sh "${{ inputs.mode }}" "${{ inputs.issue }}")
           echo "Selected: $issues"
