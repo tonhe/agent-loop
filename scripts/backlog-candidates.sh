@@ -11,12 +11,14 @@ gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 200 \
   --json number,title,body,labels,author,createdAt,comments > "$out/all.json"
 
 open=$(jq -c '[.[].number]' "$out/all.json")
-jq --arg owner "$OWNER_LOGIN" --argjson max "${MAX_CANDIDATES:-25}" --argjson open "$open" \
+# Native dependencies; {} with a warning if the API is unavailable.
+native=$(bash "$here/scripts/native-blockers.sh")
+jq --arg owner "$OWNER_LOGIN" --argjson max "${MAX_CANDIDATES:-25}" --argjson open "$open" --argjson native "$native" \
    -L "$here/lib" -f "$here/lib/candidates.jq" "$out/all.json" > "$out/candidates.json"
 
 # Owner issues skipped because they are blocked (numbers only, for the digest).
-jq -c --arg owner "$OWNER_LOGIN" --argjson open "$open" -L "$here/lib" \
-   'include "blocked"; [.[] | select(.author.login == $owner and (.body | is_blocked($open))) | .number]' \
+jq -c --arg owner "$OWNER_LOGIN" --argjson open "$open" --argjson native "$native" -L "$here/lib" \
+   'include "blocked"; [.[] | select(.author.login == $owner and issue_blocked($open; $native)) | .number]' \
    "$out/all.json" > "$out/blocked.json"
 
 # External issues: numbers and authors only. Titles are untrusted and stay out of the digest too.

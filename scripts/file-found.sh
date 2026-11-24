@@ -5,6 +5,7 @@
 # Env:   GH_TOKEN (PAT), GITHUB_REPOSITORY, MAX_FOUND (default 3), DRY_RUN
 # Prints one "- #N title" line per filed issue, "- skipped (dup): title" for duplicates.
 set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
 src=$1; result=$2; pr=${3:-}
 max=${MAX_FOUND:-3}
 repo=$GITHUB_REPOSITORY
@@ -25,7 +26,7 @@ while read -r item; do
   [[ -n $pr ]] && origin+=" ($pr)"
   body="$origin.
 
-$(jq -r '.body' <<<"$item")
+$(jq -r -L "$here/lib" 'include "base"; .body | defang_base' <<<"$item")
 
 <!-- agent-found from=$src -->"
   if [[ ${DRY_RUN:-false} == true ]]; then

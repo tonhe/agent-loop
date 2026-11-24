@@ -47,7 +47,8 @@ while read -r a; do
     [[ -z $s ]] && continue
     if (( new_issues >= max_new )); then body+=$'\n(Split limit reached for this run.)\n'; break; fi
     t=$(jq -r '.title' <<<"$s")
-    b="$(jq -r '.body' <<<"$s")"$'\n\nSplit from #'"$n"
+    # The model wrote this body; a Base: line in it must not steer a later dev run.
+    b="$(jq -r -L "$here/lib" 'include "base"; .body | defang_base' <<<"$s")"$'\n\nSplit from #'"$n"
     if [[ $dry == true ]]; then url="DRY-new-issue"; echo "DRY: create issue '$t'" >&2
     else url=$(gh issue create -R "$repo" --title "$t" --body "$b"); fi
     children+=("$url"); new_issues=$((new_issues + 1))

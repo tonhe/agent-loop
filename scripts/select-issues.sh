@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Choose which issues the dev agent works on. Prints a JSON array of numbers.
 # Usage: select-issues.sh MODE [ISSUE]
-#   MODE=scheduled  owner-authored, agent:ready, not in progress, not blocked, no open agent PR; oldest first
+#   MODE=scheduled  owner-authored, agent:ready, not in progress, not blocked ("Blocked by #N" text or a
+#                   native dependency), no open agent PR; preferred milestone first, then oldest first
 #   MODE=manual     the given issue, if owner-authored and open (you running it is the approval, blockers included)
 #   MODE=urgent     the given issue, if owner-authored, open, and labeled agent:urgent
 # Env: GH_TOKEN, GITHUB_REPOSITORY, OWNER_LOGIN, MAX_ISSUES
@@ -24,11 +25,19 @@ case "$mode" in
     ;;
   scheduled)
     issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --author "$OWNER_LOGIN" \
-               --label agent:ready --limit 100 --json number,labels,createdAt,author,body)
+               --label agent:ready --limit 100 --json number,labels,createdAt,author,body,milestone)
     open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 500 --json number --jq '[.[].number]')
     prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 100 --json number,body)
+    # Native dependencies; {} with a warning if the API is unavailable.
+    native=$(bash "$here/scripts/native-blockers.sh")
+    # Open milestones, for milestone priority. Without them the order is oldest first, as before.
+    milestones=$(gh api "repos/$GITHUB_REPOSITORY/milestones?state=open&per_page=100" \
+                   --jq '[.[] | {number, dueOn: .due_on}]') || {
+      echo "::warning::Could not list milestones; milestone priority is off for this run." >&2
+      milestones='[]'; }
     jq -nc --argjson issues "$issues" --argjson prs "$prs" '{issues: $issues, prs: $prs}' \
-      | jq -c --arg owner "$OWNER_LOGIN" --argjson max "${MAX_ISSUES:-3}" --argjson open "$open" -L "$here/lib" -f "$here/lib/select.jq"
+      | jq -c --arg owner "$OWNER_LOGIN" --argjson max "${MAX_ISSUES:-3}" --argjson open "$open" \
+           --argjson native "$native" --argjson milestones "$milestones" -L "$here/lib" -f "$here/lib/select.jq"
     ;;
   *) echo "::error::unknown mode $mode" >&2; exit 1 ;;
 esac
