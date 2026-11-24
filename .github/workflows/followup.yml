@@ -14,7 +14,7 @@ on:
       protected_paths:  {type: string, default: ""}
       go_version_file:  {type: string, default: ""}
       setup_command:    {type: string, default: ""}
-      base_branch:      {type: string, default: main}
+      base_branch:      {type: string, default: main, description: "Unused, kept so existing callers still validate: each PR's own base branch is used"}
       grace_minutes:    {type: number, default: 120, description: "Stop waiting for CodeRabbit after this"}
       auto_merge:       {type: boolean, default: true}
       model:            {type: string, default: sonnet}
@@ -41,7 +41,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AGENT_PAT }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
           PR_INPUT: ${{ inputs.pr }}
           GRACE: ${{ inputs.grace_minutes }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
@@ -157,7 +156,6 @@ jobs:
           PUSH_TOKEN: ${{ secrets.AGENT_PAT }}
           GIT_AUTHOR_NAME: ${{ inputs.git_author_name }}
           GIT_AUTHOR_EMAIL: ${{ inputs.git_author_email }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
           STATUS: ${{ steps.check.outputs.status }}
           ISSUE: ${{ steps.meta.outputs.issue }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

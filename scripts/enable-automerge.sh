@@ -2,13 +2,20 @@
 # Turn on squash auto-merge for a PR, but only if the base branch has a ruleset
 # requiring status checks with nobody allowed to bypass. Without that, GitHub would
 # merge immediately, so this refuses.
-# Usage: enable-automerge.sh PR      Env: GH_TOKEN (PAT), GITHUB_REPOSITORY, BASE_BRANCH
+# The base branch is the PR's own (it may be a per-issue base), never an assumed default.
+# Usage: enable-automerge.sh PR      Env: GH_TOKEN (PAT), GITHUB_REPOSITORY
 set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
 pr=$1
-rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$BASE_BRANCH")
+base=$(gh pr view "$pr" -R "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+if ! jq -en -L "$here/lib" --arg b "$base" 'include "base"; $b | valid_ref' >/dev/null; then
+  echo "::error::PR #$pr has a base branch that is not a plain branch name. Refusing to enable auto-merge."
+  exit 1
+fi
+rules=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$base")
 
 if ! jq -e 'any(.[]; .type == "required_status_checks")' <<<"$rules" >/dev/null; then
-  echo "::error::$BASE_BRANCH has no required status checks. Refusing to enable auto-merge."
+  echo "::error::$base has no required status checks. Refusing to enable auto-merge."
   exit 1
 fi
 

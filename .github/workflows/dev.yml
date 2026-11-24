@@ -63,9 +63,7 @@ jobs:
       N: ${{ matrix.issue }}
       OWNER_LOGIN: ${{ inputs.owner_login }}
     steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ inputs.base_branch }}", persist-credentials: false, fetch-depth: 1}
-
+      # Scripts first: the base branch has to be resolved before the repo is checked out.
       - name: Load agent-loop scripts outside the workspace
         uses: actions/checkout@v4
         with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
@@ -74,20 +72,53 @@ jobs:
           mkdir -p "$RUNNER_TEMP/out"
           echo "{\"issue\": $N, \"status\": \"error\", \"summary\": \"workflow failed before Claude finished\"}" > "$RUNNER_TEMP/out/record.json"
 
-      - if: inputs.go_version_file != ''
+      # A "Base: <branch>" line in the issue body or a base:<branch> label replaces
+      # the base_branch input. resolve-base.sh validates the name (lib/base.jq) and checks the
+      # branch exists; a bad one hands the issue back here and skips the rest of the job.
+      # The branch name only ever travels through step outputs, with: and env:.
+      - name: Resolve base branch
+        id: base
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          DEFAULT_BASE: ${{ inputs.base_branch }}
+        run: |
+          res=$(bash "$RUNNER_TEMP/agent-loop/scripts/resolve-base.sh" "$N")
+          echo "$res"
+          if [[ $(jq -r .ok <<<"$res") == true ]]; then
+            { echo "ok=true"
+              echo "branch=$(jq -r .base <<<"$res")"
+              echo "is_default=$(jq -r .is_default <<<"$res")"; } >> "$GITHUB_OUTPUT"
+          else
+            reason=$(jq -r .reason <<<"$res")
+            gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:ready --add-label needs:human
+            gh issue comment "$N" -R "$GITHUB_REPOSITORY" --body "$(printf '<!-- agent-dev -->\n**Dev agent stopped:** %s\n\nRun: %s' \
+              "$reason" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+            jq -n --argjson n "$N" --arg sum "$reason" \
+              '{issue: $n, status: "bad_base", summary: $sum, pr: "", usage: {}, found: ""}' > "$RUNNER_TEMP/out/record.json"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.base.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with: {ref: "${{ steps.base.outputs.branch }}", persist-credentials: false, fetch-depth: 1}
+
+      - if: steps.base.outputs.ok == 'true' && inputs.go_version_file != ''
         uses: actions/setup-go@v5
         with: {go-version-file: "${{ inputs.go_version_file }}"}
-      - if: inputs.setup_command != ''
+      - if: steps.base.outputs.ok == 'true' && inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
-      - run: npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
+      - if: steps.base.outputs.ok == 'true'
+        run: npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
 
       - name: Claim issue
+        if: steps.base.outputs.ok == 'true'
         env: {GH_TOKEN: "${{ secrets.AGENT_PAT }}"}
         run: |
           gh issue edit "$N" -R "$GITHUB_REPOSITORY" --add-label agent:in-progress
           gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:urgent 2>/dev/null || true
 
       - name: Build prompt (issue body + owner comments only)
+        if: steps.base.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFY_COMMAND: ${{ inputs.verify_command }}
@@ -100,6 +131,7 @@ jobs:
       # Only the Claude token is in this step's environment. No PAT, no GitHub token,
       # and the checkout has no stored credentials.
       - name: Claude works the issue
+        if: steps.base.outputs.ok == 'true'
         id: claude
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -115,6 +147,7 @@ jobs:
 
       # Agent-written code runs here (tests), so this step gets no secrets at all.
       - name: Check diff and verify
+        if: steps.base.outputs.ok == 'true'
         id: check
         env:
           PROTECTED_PATHS: ${{ inputs.protected_paths }}
@@ -151,15 +184,17 @@ jobs:
       - name: Clean checkout for publishing
         if: steps.check.outputs.status == 'ok'
         uses: actions/checkout@v4
-        with: {ref: "${{ inputs.base_branch }}", path: .publish, persist-credentials: false, fetch-depth: 1}
+        with: {ref: "${{ steps.base.outputs.branch }}", path: .publish, persist-credentials: false, fetch-depth: 1}
 
       - name: Publish PR or hand back
+        if: steps.base.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.AGENT_PAT }}
           PUSH_TOKEN: ${{ secrets.AGENT_PAT }}
           GIT_AUTHOR_NAME: ${{ inputs.git_author_name }}
           GIT_AUTHOR_EMAIL: ${{ inputs.git_author_email }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
+          BASE_BRANCH: ${{ steps.base.outputs.branch }}
+          BASE_IS_DEFAULT: ${{ steps.base.outputs.is_default }}
           MAX_FOUND: ${{ inputs.max_found }}
           STATUS: ${{ steps.check.outputs.status }}
           REASON: ${{ steps.check.outputs.reason }}
@@ -174,6 +209,14 @@ jobs:
             pr=$(bash "$L/scripts/publish-pr.sh" "$N" "$C/result.json")
             status=pr_opened
             cd ..
+            # GitHub only acts on "Closes #N" for merges into the default branch. On any other
+            # base the issue would stay open and ready, and be worked again once the PR merges.
+            # No issue comment here: an owner comment would send the issue back through triage.
+            if [[ "$BASE_IS_DEFAULT" != true ]]; then
+              gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:ready \
+                || echo "::warning::Could not remove agent:ready from #$N"
+              summary+=" (PR targets $BASE_BRANCH, not the default branch: merging will not close #$N, so close it yourself. agent:ready removed.)"
+            fi
           else
             gh issue edit "$N" -R "$GITHUB_REPOSITORY" --remove-label agent:ready --add-label needs:human
             gh issue comment "$N" -R "$GITHUB_REPOSITORY" --body "$(printf '<!-- agent-dev -->\n**Dev agent stopped:** %s\n\n%s\n\n%s\n\nRun: %s' \
