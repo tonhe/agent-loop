@@ -59,5 +59,7 @@ def assessed_at:
       previous_assessment: ($a.body // null)
     }
 ]
-| sort_by(.number)
+# Issues that were never assessed come first, then re-assessments, each lowest number
+# first: under the cap, a new issue is not kept waiting by old ones being looked at again.
+| sort_by([(.previous_assessment != null), .number])
 | .[:$max]
