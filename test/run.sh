@@ -1146,6 +1146,180 @@ check "backlog-candidates: both kinds counted as blocked" "[20,21]" "$(jq -c . "
 S_ALL="$all" gsrun bash "$root/scripts/backlog-candidates.sh" "$gs/w2" >/dev/null 2>&1; rc=$?
 check "backlog-candidates: dependency API down -> text blockers only, exit 0" "[21,22] 0" "$(jq -c 'map(.number)' "$gs/w2/candidates.json") $rc"
 
+# ---------- blocker audit: text against native dependencies (lib/audit-blockers.jq, audit-blockers.sh) ----------
+# One page of open issues per line, as gh api graphql --paginate prints them.
+# 4, 9, 39: blockers (9 is someone else's, 39 has no usable id). 3, 50 and 999 are not
+# open issues: a closed issue, a pull request and a number that does not exist.
+au_nat() { printf '{"number":%s,"state":"%s","repository":{"nameWithOwner":"%s"}}' "$1" "$2" "${3:-o/r}"; }
+au_iss() { jq -cn --argjson n "$1" --arg a "$2" --arg b "$3" --arg id "${4:-}" --argjson nat "[${5:-}]" --argjson total "${6:--1}" \
+  '{number: $n, fullDatabaseId: $id, author: {login: $a}, body: $b, blockedBy: {totalCount: (if $total < 0 then ($nat | length) else $total end), nodes: $nat}}'; }
+au_page() { jq -cs '{data: {repository: {issues: {pageInfo: {hasNextPage: false, endCursor: null}, nodes: .}}}}'; }
+au_pages=$({ au_iss 4 tonhe "ok" 1004; au_iss 9 mallory "ok" 1009
+             au_iss 20 tonhe "Blocked by #4." 1020
+             au_iss 21 tonhe "ok" 1021 "$(au_nat 4 OPEN)"
+             au_iss 22 tonhe "Blocked by #4." 1022 "$(au_nat 4 OPEN)"
+             au_iss 23 tonhe "ok" 1023; } | au_page
+           { au_iss 24 tonhe "Blocked by #4 and by #20. Do this after #9 merges" 1024
+             au_iss 25 tonhe "Blocked by #3." 1025
+             au_iss 26 tonhe "Blocked by #999, and after #50 merges" 1026
+             au_iss 27 mallory "Blocked by #4." 1027
+             au_iss 28 tonhe "Blocked by the design issue." 1028
+             au_iss 29 tonhe $'<!-- agent-plan -->\nBlocked by #4.' 1029
+             au_iss 30 tonhe "Blocked by #29." 1030
+             au_iss 31 tonhe "Blocked by #31." 1031
+             au_iss 32 tonhe "Blocked by other/repo#4." 1032
+             au_iss 33 tonhe "Blocked by #4." 1033 "$(au_nat 4 OPEN other/repo)"
+             au_iss 34 tonhe "ok" 1034 "$(au_nat 3 CLOSED)"
+             au_iss 35 tonhe "Blocked by #4." 1035 "" 60
+             au_iss 37 tonhe "ok" 1037 "$(au_nat 5 OPEN other/repo)"
+             au_iss 38 tonhe "Blocked by #39." 1038
+             au_iss 39 tonhe "ok" ""
+             au_iss 40 tonhe "Part of #23. Blocked by the design issue under #23, and by #20." 1040; } | au_page)
+au_issues=$(jq -cs -L "$root/lib" 'include "audit-blockers"; audit_issues("o/r")' <<<"$au_pages")
+check "audit_issues: every open issue across pages, with id, author and all native blockers (open and closed)" \
+  '22|{"number":34,"id":"1034","author":"tonhe","body":"ok","native":[{"number":3,"state":"CLOSED","local":true}],"truncated":false}' \
+  "$(jq -c 'length, (.[] | select(.number == 34))' <<<"$au_issues" | paste -sd'|' -)"
+check "audit_issues: a blocker in another repository is marked; a list longer than the page is truncated" 'false|true' \
+  "$(jq -c '(.[] | select(.number == 33) | .native[0].local), (.[] | select(.number == 35) | .truncated)' <<<"$au_issues" | paste -sd'|' -)"
+check "audit_issues: the repository name is compared without case" "true" \
+  "$(jq -cs -L "$root/lib" 'include "audit-blockers"; audit_issues("O/R") | .[] | select(.number == 21) | .native[0].local' <<<"$au_pages")"
+jq -cs -L "$root/lib" 'include "audit-blockers"; audit_issues("o/r")' <<<'{"errors":[{"message":"Field blockedBy does not exist"}]}' >/dev/null 2>&1
+check "audit_issues: GraphQL error answer is refused" "5" "$?"
+jq -cs -L "$root/lib" 'include "audit-blockers"; audit_issues("o/r")' <<<'' >/dev/null 2>&1
+check "audit_issues: empty answer is refused" "5" "$?"
+
+# Which numbers in a "blocked by" sentence are named plainly as the blocker (phrasings from real viaduct issues).
+adb() { jq -rn -L "$root/lib" --arg b "$1" 'include "audit-blockers"; $b | direct_blockers | map(tostring) | join(",")'; }
+check "direct blockers: plain form"                  "4"     "$(adb '> **Blocked by #4.** The code is on the branch.')"
+check "direct blockers: a plain list"                "4,5,6" "$(adb 'Blocked by #4, #5 and #6.')"
+check "direct blockers: colon, bold and 'issue'"     "4,7"   "$(adb $'**Blocked by:** #4\nBlocked by issue #7')"
+check "direct blockers: the parent under which the blocker lives is not a blocker" "4" "$(adb 'Part of #6. Blocked by the agent-mode design issue under #6, and by #4.')"
+check "direct blockers: ... nor the epic the blockers come from" "4" "$(adb 'Part of #16. Blocked by #4 and by the snapshot format and diff logic issues from #16.')"
+check "direct blockers: after #N merges"             "4"     "$(adb 'Do this after #4 merges')"
+check "direct blockers: negated, quoted and unnumbered give nothing" "" \
+  "$(adb $'This is not blocked by #4.\nThe "Blocked by" line is parsed. "blocked by #9"\nBlocked by the agent implementation issue.')"
+check "direct blockers: never a number that blockers does not also give" "[]" \
+  "$(jq -cn -L "$root/lib" 'include "audit-blockers"; include "blocked"; ["Blocked by #4, #5 and #6.", "Part of #6. Blocked by the design issue under #6, and by #4.", "not blocked by #4", "after #4 merges, by #8", "Blocked by: issue #7 & #8"] | map(. as $b | ($b | direct_blockers) - ($b | blockers)) | add')"
+
+aup() { jq -c -L "$root/lib" --argjson max "${2:-10}" "include \"audit-blockers\"; audit_plan(\"tonhe\"; \$max) | $1" <<<"$au_issues"; }
+check "audit plan: text only -> link planned with the blocker's database id; several blockers -> one link each" \
+  '[{"issue":20,"blocker":4,"id":"1004"},{"issue":24,"blocker":4,"id":"1004"},{"issue":24,"blocker":20,"id":"1020"},{"issue":40,"blocker":20,"id":"1020"}]' "$(aup .add)"
+check "audit plan: link only -> reported, never planned; a blocker someone else wrote -> reported; too many links -> reported" \
+  '[{"issue":21,"blocker":4,"kind":"link_only"},{"issue":24,"blocker":9,"kind":"not_owner"},{"issue":35,"blocker":null,"kind":"truncated"}]' "$(aup '.report | map(select(.issue != 40))')"
+check "audit plan: a number in the sentence that is not plainly the blocker (the parent) is reported, never linked" \
+  '[{"issue":40,"blocker":23,"kind":"indirect"}]|0' "$(aup '(.report | map(select(.issue == 40))), ([.add[] | select(.blocker == 23)] | length)' | paste -sd'|' -)"
+check "audit plan: both, or neither -> nothing at all" "0" \
+  "$(aup '[.add[], .report[], .skipped[], .over_cap[] | select(.issue == 22 or .issue == 23)] | length')"
+check "audit plan: a closed blocker, a pull request and a number that does not exist are left alone" \
+  '[{"issue":25,"blocker":3,"why":"not_open"},{"issue":26,"blocker":50,"why":"not_open"},{"issue":26,"blocker":999,"why":"not_open"}]' \
+  "$(aup '[.skipped[] | select(.issue == 25 or .issue == 26)]')"
+check "audit plan: someone else's issue is not audited" "0" "$(aup '[.. | objects | select(.issue? == 27)] | length')"
+check "audit plan: a Plan issue is not audited, and is never linked as a blocker" '0|[{"issue":30,"blocker":29,"why":"meta"}]' \
+  "$(aup '([.. | objects | select(.issue? == 29)] | length), [.skipped[] | select(.issue == 30)]' | paste -sd'|' -)"
+check "audit plan: unnumbered blocker, itself, owner/repo#N and a blocker without an id are skipped" \
+  '[28,-1,"unnumbered"]|[31,31,"self"]|[32,4,"cross_repo"]|[38,39,"no_id"]' \
+  "$(aup '.skipped[] | select(.issue == 28 or .issue == 31 or .issue == 32 or .issue == 38) | [.issue, .blocker, .why]' | paste -sd'|' -)"
+check "audit plan: a link of the same number in another repository counts as present; such a link is never reported" "0" \
+  "$(aup '[.. | objects | select(.issue? == 33 or .issue? == 37)] | length')"
+check "audit plan: a closed native blocker the text does not mention is not reported" "0" "$(aup '[.. | objects | select(.issue? == 34)] | length')"
+check "audit plan: an issue with too many native blockers gets no link" "0" "$(aup '[.add[] | select(.issue == 35)] | length')"
+check "audit plan: counts the issues audited (the owner's, without the Plan issue)" "19" "$(aup .checked)"
+check "audit plan: cap -> the first links by issue number, the rest listed" '[[20,4],[24,4]]|[{"issue":24,"blocker":20},{"issue":40,"blocker":20}]' \
+  "$(aup '(.add | map([.issue, .blocker])), .over_cap' 2 | paste -sd'|' -)"
+check "audit plan: cap 0 plans nothing" '0|4' "$(aup '(.add | length), (.over_cap | length)' 0 | paste -sd'|' -)"
+check "audit plan: no open issues -> an empty plan" '{"checked":0,"add":[],"over_cap":[],"report":[],"skipped":[]}' \
+  "$(jq -c -L "$root/lib" 'include "audit-blockers"; audit_plan("tonhe"; 10)' <<<'[]')"
+
+aut() { jq -rn -L "$root/lib" --argjson in "$1" --argjson lines "${2:-15}" 'include "audit-blockers"; $in | audit_text(10; $lines)'; }
+au_none='{"checked":3,"add":[],"over_cap":[],"report":[],"skipped":[{"issue":25,"blocker":3,"why":"not_open"}]}'
+check "audit text: nothing to tell -> empty (skips are for the log only)" "" "$(aut "{\"plan\": $au_none, \"results\": []}")"
+au_full='{"plan":{"checked":9,"add":[],"over_cap":[{"issue":24,"blocker":20}],
+  "report":[{"issue":21,"blocker":4,"kind":"link_only"},{"issue":24,"blocker":9,"kind":"not_owner"},{"issue":35,"blocker":null,"kind":"truncated"}],"skipped":[]},
+ "results":[{"issue":20,"blocker":4,"status":"added"},{"issue":24,"blocker":4,"status":"failed"}]}'
+check "audit text: every link added, every failure and every mismatch is listed" \
+  'Blocker audit (text against native links): 1 added, 1 failed, 4 to look at.|- #20: link to #4 added|- #24: could not add the link to #4, see the run log|- #24: text names #20, no link; not added, limit of 10 per run|- #21: linked to #4, which its text does not mention|- #24: text names #9, which is not your issue; no link added|- #35: more linked blockers than could be read; not checked' \
+  "$(aut "$au_full" | paste -sd'|' -)"
+check "audit text: dry run and report-only wording" \
+  'Blocker audit (text against native links): 1 would be added, 1 to look at.|- #20: would add the link to #4 (dry run)|- #24: text names #4, no link (report only, nothing added)' \
+  "$(aut "{\"plan\": $au_none, \"results\": [{\"issue\":20,\"blocker\":4,\"status\":\"dry\"},{\"issue\":24,\"blocker\":4,\"status\":\"report\"}]}" | paste -sd'|' -)"
+check "audit text: long lists are cut and the rest counted" '4|- and 4 more, see the run log' \
+  "$(aut "$au_full" 2 | wc -l | tr -d ' ')|$(aut "$au_full" 2 | tail -1)"
+
+# The script against a stubbed gh. Every write prints an issue URL, as the real API does.
+au=$(mktemp -d); mkdir -p "$au/bin"
+cat > "$au/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "$*" | tr '\n' ' ' >> "$GHLOG"; echo >> "$GHLOG"   # one line per call (the query has several)
+case "$1 $2" in
+  "api graphql")
+    [[ -n "${A_GRAPHQL:-}" ]] || { echo "gh: HTTP 502" >&2; exit 1; }
+    printf '%s\n' "$A_GRAPHQL" ;;
+  "api -X")
+    if [[ "$4" == "repos/o/r/issues/${A_POST_FAIL:-none}/"* ]]; then echo "gh: Validation Failed (HTTP 422)" >&2; exit 1; fi
+    echo '{"html_url":"https://github.com/o/r/issues/1","url":"https://api.github.com/repos/o/r/issues/1"}' ;;
+  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
+esac
+GH
+chmod +x "$au/bin/gh"
+aurun() { : > "$au/log"; rm -rf "$au/w"; PATH="$au/bin:$PATH" GHLOG="$au/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN="${AU_OWNER:-tonhe}" A_GRAPHQL="${AU_PAGES-$au_pages}" \
+          bash "$root/scripts/audit-blockers.sh" "$au/w" 2>"$au/err"; }
+auposts() { grep '^api -X' "$au/log" | sed 's/ $//' | paste -sd'|' -; }
+out=$(aurun); rc=$?
+check "audit-blockers: adds exactly the planned links, each with the blocker's database id" \
+  '0|api -X POST repos/o/r/issues/20/dependencies/blocked_by -F issue_id=1004|api -X POST repos/o/r/issues/24/dependencies/blocked_by -F issue_id=1004|api -X POST repos/o/r/issues/24/dependencies/blocked_by -F issue_id=1020|api -X POST repos/o/r/issues/40/dependencies/blocked_by -F issue_id=1020' \
+  "$rc|$(auposts)"
+check "audit-blockers: one read (the query), and nothing but POSTs to blocked_by after it" "1|0" \
+  "$(grep -c '^api graphql --paginate ' "$au/log")|$(grep -v '^api graphql ' "$au/log" | grep -vc '^api -X POST repos/o/r/issues/[0-9]*/dependencies/blocked_by -F issue_id=[0-9]* $')"
+check "audit-blockers: never removes a dependency and never edits an issue" "0" "$(grep -ciE 'DELETE|PATCH|issue edit|issue comment|issue close' "$au/log")"
+check "audit-blockers: the digest text lists every link added and every mismatch" \
+  'Blocker audit (text against native links): 4 added, 4 to look at.|- #20: link to #4 added|- #24: link to #4 added|- #24: link to #20 added|- #40: link to #20 added|- #21: linked to #4, which its text does not mention|- #24: text names #9, which is not your issue; no link added|- #35: more linked blockers than could be read; not checked|- #40: its blocked-by sentence mentions #23, but not plainly as the blocker; no link added' \
+  "$(paste -sd'|' - <<<"$out")"
+check "audit-blockers: no URL in the digest text (gh output goes to the log)" "0|4" "$(grep -c 'http' <<<"$out")|$(grep -c 'html_url' "$au/err")"
+check "audit-blockers: someone else's issue is untouched and not mentioned" "0|0" "$(grep -c 'issues/27/' "$au/log")|$(grep -c '#27' <<<"$out")"
+check "audit-blockers: the plan is kept in the work directory" "4" "$(jq '.add | length' "$au/w/audit-plan.json")"
+out=$(MAX_LINKS=2 aurun); rc=$?
+check "audit-blockers: the cap is respected, and what was left out is listed" "0|2|1" \
+  "$rc|$(grep -c '^api -X' "$au/log")|$(grep -c '^- #24: text names #20, no link; not added, limit of 2 per run$' <<<"$out")"
+out=$(DRY_RUN=true aurun); rc=$?
+check "audit-blockers: dry run writes nothing and says what it would add" "0|0|4" "$rc|$(grep -c '^api -X' "$au/log")|$(grep -c 'would add the link' <<<"$out")"
+out=$(AUDIT_MODE=report aurun); rc=$?
+check "audit-blockers: report-only writes nothing and lists the missing links" "0|0|4" "$rc|$(grep -c '^api -X' "$au/log")|$(grep -c 'no link (report only, nothing added)' <<<"$out")"
+out=$(AUDIT_MODE=off aurun); rc=$?
+check "audit-blockers: off -> no call at all, no text" "0|0|" "$rc|$(grep -c . "$au/log")|$out"
+out=$(AUDIT_MODE=everything aurun); rc=$?
+check "audit-blockers: an unknown mode only reports, with a warning" "0|0|1" "$rc|$(grep -c '^api -X' "$au/log")|$(grep -c '^::warning::' "$au/err")"
+out=$(MAX_LINKS='2; rm -rf /' aurun); rc=$?
+check "audit-blockers: a cap that is not a number is refused before any call" "1|0" "$rc|$(grep -c . "$au/log")"
+out=$(AU_PAGES='' aurun); rc=$?
+check "audit-blockers: API down -> warning, exit 0, nothing written, the digest says nothing was checked" "0|1|0|Blocker audit: could not read the issues and their dependencies; nothing was checked or changed." \
+  "$rc|$(grep -c '^::warning::' "$au/err")|$(grep -c '^api -X' "$au/log")|$out"
+out=$(AU_PAGES='{"errors":[{"message":"nope"}]}' aurun); rc=$?
+check "audit-blockers: unusable answer -> the same, nothing written" "0|0" "$rc|$(grep -c '^api -X' "$au/log")"
+out=$(A_POST_FAIL=20 aurun); rc=$?
+check "audit-blockers: a link that cannot be added is a warning, the others are still added, exit 0" "0|4|1|1|3" \
+  "$rc|$(grep -c '^api -X' "$au/log")|$(grep -c '^::warning::' "$au/err")|$(grep -c '^- #20: could not add the link to #4, see the run log$' <<<"$out")|$(grep -c 'link to #[0-9]* added$' <<<"$out")"
+out=$(AU_OWNER=mallory aurun); rc=$?
+check "audit-blockers: another owner -> only their issue, and no link to an issue that is not theirs" "0||1" \
+  "$rc|$(auposts)|$(grep -c '^- #27: text names #4, which is not your issue; no link added$' <<<"$out")"
+out=$(AU_PAGES=$({ au_iss 4 tonhe "ok" 1004; au_iss 22 tonhe "Blocked by #4." 1022 "$(au_nat 4 OPEN)"; au_iss 23 tonhe "ok" 1023; } | au_page) aurun); rc=$?
+check "audit-blockers: text and links agree -> no write and no digest text" "0|0|" "$rc|$(grep -c '^api -X' "$au/log")|$out"
+canary="$au/canary"
+out=$(AU_PAGES=$({ au_iss 4 tonhe "ok" 1004; au_iss 20 tonhe "Blocked by #4 \$(touch $canary) \`touch $canary\`" 1020; } | au_page) aurun); rc=$?
+check "audit-blockers: shell syntax in an issue body is never run" "0|no|1" "$rc|$([[ -e "$canary" ]] && echo yes || echo no)|$(grep -c '^api -X' "$au/log")"
+rm -rf "$au"
+au_yml="$root/.github/workflows/backlog.yml"
+au_step=$(sed -n '/^      - name: Blocker audit/,/^      - name: Record the plan/p' "$au_yml")
+check "backlog.yml: the audit step is independent of triage, uses the PAT and honours dry_run" "1|1|1|1|1|1" \
+  "$(grep -c '^        if: \${{ !cancelled() && inputs.blocker_audit != .off. }}$' <<<"$au_step")|$(grep -c '^          GH_TOKEN: \${{ secrets.AGENT_PAT }}$' <<<"$au_step")|$(grep -c '^          DRY_RUN: \${{ inputs.dry_run }}$' <<<"$au_step")|$(grep -c '^          OWNER_LOGIN: \${{ inputs.owner_login }}$' <<<"$au_step")|$(grep -c '^          AUDIT_MODE: \${{ inputs.blocker_audit }}$' <<<"$au_step")|$(grep -c '^          MAX_LINKS: \${{ inputs.max_blocker_links }}$' <<<"$au_step")"
+check "backlog.yml: a failed audit is a warning, not a failed run" "1|0" \
+  "$(grep -c '::warning::Blocker audit failed' <<<"$au_step")|$(grep -cE '^[[:space:]]*exit ' <<<"$au_step")"
+check "backlog.yml: the audit inputs never interpolated into a run: block" "0" \
+  "$(grep -E 'inputs\.(blocker_audit|max_blocker_links)' "$au_yml" | grep -vcE '^[[:space:]]*(if|AUDIT_MODE|MAX_LINKS): ')"
+check "backlog.yml: the audit is on by default, with a small cap" "1|1" \
+  "$(grep -c '^      blocker_audit: *{type: string, default: fix,' "$au_yml")|$(grep -c '^      max_blocker_links: *{type: number, default: 10,' "$au_yml")"
+check "audit: selection and triage do not read the audit's files" "0" \
+  "$(grep -lE 'audit-blockers|audit-plan|audit\.txt' "$root/scripts/select-issues.sh" "$root/scripts/backlog-candidates.sh" "$root/scripts/native-blockers.sh" "$root/scripts/apply-backlog.sh" "$root"/lib/{select,candidates,blocked,native-blockers,validate-plan}.jq | wc -l | tr -d ' ')"
+
 # ---------- milestone priority (select.jq) ----------
 ms_in='{"prs":[],"issues":[
  {"number":30,"createdAt":"2026-01-01T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"}],"body":"","milestone":null},
@@ -2371,6 +2545,14 @@ printf '**Backlog: r**\n- #1 +risk:low\n' > "$bw/digest.md"
 check "digest: digest.md is used as it is" "**Backlog: r**|- #1 +risk:low" "$(bd 1 true success | paste -sd'|' -)"
 echo '{"num_turns":7,"duration_ms":185000}' > "$bw/claude/usage.json"
 check "digest: Claude usage appended" "Claude: 7 turns, 3 min" "$(bd 1 true success | tail -1)"
+: > "$bw/audit.txt"
+check "digest: an empty blocker audit adds nothing" "**Backlog: r**|- #1 +risk:low|Claude: 7 turns, 3 min" "$(bd 1 true success | paste -sd'|' -)"
+printf 'Blocker audit (text against native links): 1 added.\n- #20: link to #4 added\n' > "$bw/audit.txt"
+check "digest: the blocker audit's text is appended after the triage lines" \
+  "**Backlog: r**|- #1 +risk:low|Blocker audit (text against native links): 1 added.|- #20: link to #4 added|Claude: 7 turns, 3 min" "$(bd 1 true success | paste -sd'|' -)"
+rm -f "$bw/digest.md" "$bw/claude/usage.json"
+check "digest: ... also on a night with nothing to triage" "**Backlog: r**|Nothing new to triage.|Blocker audit (text against native links): 1 added.|- #20: link to #4 added" \
+  "$(bd 0 false success | paste -sd'|' -)"
 rm -rf "$bw"
 bl_yml="$root/.github/workflows/backlog.yml"
 check "backlog.yml: the Digest step uses the tested script and knows whether there was work" "1|1|0" \
