@@ -1,0 +1,65 @@
+# CI for agent-loop itself: the offline test suite, shellcheck on every shell script,
+# the Claude Code plugin validation and the Worker tests. One job named "test", so the
+# check the main ruleset requires is "test". No secrets: everything here runs offline
+# (the suites stub gh, the Worker tests use a fake fetch).
+name: test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SHELLCHECK_VERSION: v0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      CLAUDE_CODE_VERSION: 2.1.332
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Tools
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          echo "$SHELLCHECK_SHA256  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-$SHELLCHECK_VERSION" >> "$GITHUB_PATH"
+          # Some suites commit in throwaway repositories.
+          git config --global user.name "agent-loop ci"
+          git config --global user.email "ci@agent-loop.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Shellcheck (every shell script)
+        run: |
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 shellcheck
+
+      - name: Test suite (test/run.sh, which includes test/sprint.sh)
+        run: bash test/run.sh
+
+      - name: Worker tests
+        working-directory: worker
+        run: npm test
+
+      - name: Plugin validation
+        if: hashFiles('.claude-plugin/plugin.json') != ''
+        run: npx --yes "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" plugin validate .
