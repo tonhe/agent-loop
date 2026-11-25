@@ -16,6 +16,8 @@ on:
       release_issues:   {type: boolean, default: true, description: "Open or refresh a 'Release vX.Y.Z' issue when a release is due. Never tags."}
       milestone_planning: {type: boolean, default: true, description: "Open a 'Plan vX.Y' proposal issue when the active milestone runs low. Never changes milestones."}
       roadmap_path:     {type: string, default: ROADMAP.md, description: "Roadmap file the planning proposal reads its next epic from, if it exists"}
+      blocker_audit:    {type: string, default: fix, description: "Compare 'Blocked by #N' in your issues with GitHub's native dependencies. fix: add a missing native link and report the rest; report: report only; off: skip"}
+      max_blocker_links: {type: number, default: 10, description: "Most native dependency links the blocker audit adds in one run"}
       claude_version:   {type: string, default: "2.1.331"}
       loop_ref:         {type: string, default: main, description: "Ref of tonhe/agent-loop to load scripts from; match the @ref you call"}
       loop_repo:        {type: string, default: tonhe/agent-loop}
@@ -127,6 +129,29 @@ jobs:
           fi
           { echo; cat "$W/release.txt"; } >> "$GITHUB_STEP_SUMMARY"
 
+      # Blocker audit: independent of triage too. Where one of the owner's issues names
+      # an open blocker in its text and the native dependency is missing, it adds that
+      # link; every other mismatch is only reported. It never removes a link and never
+      # edits an issue (scripts/audit-blockers.sh). Its text goes into the digest.
+      - name: Blocker audit (text and native dependencies)
+        if: ${{ !cancelled() && inputs.blocker_audit != 'off' }}
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          AUDIT_MODE: ${{ inputs.blocker_audit }}
+          MAX_LINKS: ${{ inputs.max_blocker_links }}
+        run: |
+          W="$RUNNER_TEMP/work"; mkdir -p "$W"
+          if "$RUNNER_TEMP/agent-loop/scripts/audit-blockers.sh" "$W" > "$W/audit.txt"; then
+            cat "$W/audit.txt"
+          else
+            cat "$W/audit.txt"
+            echo "::warning::Blocker audit failed; see the log."
+            echo "Blocker audit: failed; see the run log." > "$W/audit.txt"
+          fi
+          if [[ -s "$W/audit.txt" ]]; then { echo; cat "$W/audit.txt"; } >> "$GITHUB_STEP_SUMMARY"; fi
+
       # Keep what Claude proposed and what the guardrails let through, so a run that
       # applies nothing can be explained afterwards.
       - name: Record the plan
@@ -153,6 +178,7 @@ jobs:
             ${{ runner.temp }}/work/planning.json
             ${{ runner.temp }}/work/plan-body.md
             ${{ runner.temp }}/work/digest.md
+            ${{ runner.temp }}/work/audit-plan.json
             ${{ runner.temp }}/work/claude/result.json
             ${{ runner.temp }}/work/claude/usage.json
 

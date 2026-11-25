@@ -19,6 +19,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Guardrail | Enforced by |
 |---|---|
 | Blocked issues wait: "Blocked by #N" (or "after #N merges") while #N is open, a blocker with no number, or an open blocker in GitHub's native issue dependencies keeps an issue out of triage and dev | `lib/blocked.jq`, `lib/native-blockers.jq`, `native-blockers.sh` |
+| The blocker audit only ever adds a native dependency between two of your own open issues of this repository, where the text names the blocker plainly; at most `max_blocker_links` per run. It never removes a link, never edits an issue, and its failure changes nothing for triage and dev | `lib/audit-blockers.jq` (`audit_plan`, `direct_blockers`), `audit-blockers.sh` (own query, one kind of write) |
 | A per-issue base branch must be a plain branch name that already exists; anything else hands the issue back | `lib/base.jq`, `resolve-base.sh` |
 | Only the owner's issues are ever shown to Claude | `select-issues.sh`, `issue-context.sh`, `lib/candidates.jq` (author check); the review of an owner PR reads linked issues through `issue-context.sh` too (`review-linked.sh`) |
 | Other people's comments never reach Claude | `issue-context.sh`, `review-context.sh` (owner, CodeRabbit, github-actions only) |
@@ -114,6 +115,19 @@ Two sources, and an issue is blocked if either says so:
 - **Native:** GitHub's issue dependencies. `native-blockers.sh` reads `blockedBy` for all open issues in one paginated GraphQL query and `lib/native-blockers.jq` reduces it to `{"<issue>": [open blocker numbers]}`, which the selection filters take as `--argjson native`. Closed blockers do not count. A blocker in another repository counts while it is open.
 
 If the dependencies query fails (API unavailable, token cannot read it), the run logs a warning and carries on with the text form only. It does not fail, and it does not treat everything as blocked.
+
+### Blocker audit
+
+The loop honours either source, but GitHub's own display (the issue sidebar, "blocked" in lists, milestone progress) uses the native link only. An issue with the text and no link looks unblocked on GitHub. The backlog run therefore compares the two every night, by script (`audit-blockers.sh`, decided by `lib/audit-blockers.jq`; no model call):
+
+- **Text names an open blocker, no native link:** the link is added (`POST repos/{repo}/issues/{n}/dependencies/blocked_by`). Only when both issues are open, yours (`owner_login`) and in this repository, and the text names the blocker plainly: `Blocked by #4`, `Blocked by #4, #5 and #6`, `… and by #4`, `after #4 merges`. A number that merely appears in the sentence (`Blocked by the design issue under #6`) is reported, not linked.
+- **Native link to an open blocker, not in the text:** reported only. Issue bodies are never edited; the link alone already blocks.
+- **Left alone, and not reported:** a blocker that is closed, a pull request or a number that does not exist; a blocker with no number; `owner/repo#N`; Release and Plan issues, on either end; issues written by someone else. A blocker someone else wrote is reported, never linked.
+
+The digest lists every link added and every mismatch as `#N`, and says nothing when text and links agree. At most `max_blocker_links` (default 10) links are added per run; the rest are listed and picked up the next night. With `dry_run: true` it prints what it would add. A failed audit is a warning: the run does not fail, and triage and dev see exactly what they saw before (the audit reads with its own query).
+
+- **Off switch:** `blocker_audit: off` on the backlog workflow. `blocker_audit: report` keeps the report and adds nothing. The default is `fix`.
+- **Undoing a link:** remove it in the issue sidebar. If the text still names the blocker, the next run adds it again, so change the text too.
 
 ## Per-issue base branch
 
