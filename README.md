@@ -57,7 +57,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Digest can't ping anyone | `discord.sh` sets `allowed_mentions.parse = []` |
 | Sprint mode merges only through the merge gate: required checks green on the head, no protected or process path, and nothing that needs the owner's approval (`risk:low` only, no `protected_review_paths` file, no `agent:live-check`: otherwise "needs owner merge", since agents act as the owner), the issue not `needs:human`, no conflicts, up to date if the ruleset says so; never in agent-loop itself | `scripts/merge-gate.sh` decides with `lib/merge-gate.jq`, reading settings from the caller workflows on the PR's base (`loop-config.sh`); the plugin's guard hook blocks `gh pr merge`, the merge API and `enable-automerge.sh` |
 | A sprint agent cannot speak for the owner, undo a stop or loosen a gate | `hooks/guard.sh` (PreToolUse, subagents included): no comment beginning `Owner decision` or `Live check passed/failed`, no removing `needs:human`, no adding, removing or setting `risk:*` or `agent:live-check` (`gh issue/pr edit`, `create`, `gh api`, GraphQL; label names matched case-insensitively), no creating, renaming or deleting labels, `gh api` read-only (no fields, no method but GET, no GraphQL, no shell expansions but `$R`), no gh aliases or extensions, no edits to the installed plugin |
-| Local and nightly runs pick the same work and never the same issue at once | `sprint-select.sh` runs `select-issues.sh scheduled` unchanged; `claim-issue.sh` uses `agent:in-progress`, which the nightly selection skips |
+| Local and nightly runs pick the same work (a sprint only within its milestone) and never the same issue at once | `sprint-select.sh` runs `select-issues.sh scheduled` unchanged and keeps the finish-line milestone's issues; `claim-issue.sh` uses `agent:in-progress`, which the nightly selection skips |
 | No two sprint subagents on the same files | `sprint-next.sh`, `lib/sprint.jq` (`pick_parallel`): overlapping scopes wait; an issue that names no file runs alone |
 | A sprint subagent stops instead of touching protected code without a decision | `scope-check.sh`, then `claim-issue.sh stop` (comment, `needs:human`, claim released) |
 | Nothing a subagent noticed is left unfiled | `check-report.sh`, `lib/sprint.jq` (`report_problems`): a noted item without an issue URL, or a bare `#N`, rejects the report |
@@ -349,7 +349,8 @@ The coordinator loops: pick (`sprint-next.sh`), dispatch `work-issue` subagents,
 
 ### What it picks
 
-- The nightly selection, unchanged: `sprint-select.sh` runs `select-issues.sh scheduled` with the caller's settings. Its first `max_issues` entries are what tonight's run would pick; the sprint takes the whole queue in that order.
+- The milestone is the sprint's scope. `sprint-select.sh` runs the nightly selection (`select-issues.sh scheduled`, unchanged, with the caller's settings) and keeps only the open issues in the finish-line milestone, in the nightly order. A ready issue in another milestone, or in none, isn't picked, however high it sits in tonight's queue.
+- Without a milestone the sprint takes the whole nightly queue. Its first `max_issues` entries are what tonight's run would pick.
 - Plus `agent:paired` issues in the finish-line milestone. The nightly run never takes them; a sprint may.
 - Never two subagents on the same files. An issue's files are the paths its body and your comments (the assessment included) name, plus every file its open PR already changes. Overlapping issues wait. An issue that names no file runs alone.
 - A claim is the nightly job's `agent:in-progress` label (`claim-issue.sh`), so a sprint and the nightly run never take the same issue.

@@ -375,7 +375,8 @@ case "$a" in
   "issue edit "*|"issue comment "*|"pr edit "*|"pr comment "*|"label create "*) : ;;
   "issue list"*"--label agent:ready"*) jq -s '[.[] | select(.state == "OPEN" and ([.labels[].name] | index("agent:ready")))]' "$SP"/issues/*.json | out ;;
   "issue list"*"--label agent:paired"*) jq -s '[.[] | select(.state == "OPEN" and ([.labels[].name] | index("agent:paired")))]' "$SP"/issues/*.json | out ;;
-  "issue list"*"--milestone"*) jq -s '[.[] | select(.state == "OPEN" and .milestone.title == "v0.3.0")]' "$SP"/issues/*.json | out ;;
+  "issue list"*"--milestone"*) for ((i=0; i<${#args[@]}; i++)); do [[ "${args[i]}" == --milestone ]] && ms=${args[i+1]}; done
+                               jq -s --arg m "$ms" '[.[] | select(.state == "OPEN" and .milestone.title == $m)]' "$SP"/issues/*.json | out ;;
   "issue list"*) jq -s '[.[] | select(.state == "OPEN")]' "$SP"/issues/*.json | out ;;
   "pr list"*) if [[ -f "$SP/prs.json" ]]; then out < "$SP/prs.json"; else echo '[]' | out; fi ;;
   *"/issues/"*"/comments"*) if [[ -f "$SP/comments.json" ]]; then out < "$SP/comments.json"; else echo '[]' | out; fi ;;
@@ -513,10 +514,21 @@ mkissue 9 agent:paired,needs:human "" v0.3.0 tonhe 09
 mkissue 10 agent:ready "" "" tonhe 10
 mkissue 11 agent:paired "" v0.3.0 tonhe 11
 echo '[{"number": 90, "headRefName": "issue-10", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": ""}]' > "$sp/prs.json"
+mkissue 13 agent:ready,type:bug "" v0.4.0 tonhe 13
+mkissue 14 agent:ready,type:docs "" v0.3.0 tonhe 14
 nightly=$(sprun env OWNER_LOGIN=tonhe MAX_ISSUES=3 SELECTION_ORDER=type bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null)
+nightly_all=$(sprun env OWNER_LOGIN=tonhe MAX_ISSUES=100 SELECTION_ORDER=type bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null)
+local_all=$(sprun bash "$root/scripts/sprint-select.sh" 2>/dev/null)
 local_sel=$(sprun bash "$root/scripts/sprint-select.sh" v0.3.0 2>/dev/null)
-check "select: the sprint's ready queue starts with exactly the nightly pick" "$nightly" "$(jq -c '.ready[:3]' <<<"$local_sel")"
-check "select: ready queue (milestone first, then type order; blocked, others', busy left out)" "[5,3,2]" "$(jq -c .ready <<<"$local_sel")"
+check "select: without a milestone the sprint's ready queue starts with exactly the nightly pick" "$nightly" "$(jq -c '.ready[:3]' <<<"$local_all")"
+check "select: without a milestone the ready queue is the whole nightly queue" "$nightly_all" "$(jq -c .ready <<<"$local_all")"
+check "select: the nightly queue spans both milestones and none (the fixture is meaningful)" "true" \
+  "$(jq -c 'index(5) != null and index(13) != null and index(3) != null' <<<"$nightly_all")"
+check "select: a sprint on v0.3.0 takes only v0.3.0's ready issues, in the nightly order" \
+  "$(jq -c '[.[] | select(. == 5 or . == 14)]' <<<"$nightly_all")" "$(jq -c .ready <<<"$local_sel")"
+check "select: a sprint on v0.4.0 takes only v0.4.0's ready issues" "[13]" "$(sprun bash "$root/scripts/sprint-select.sh" v0.4.0 2>/dev/null | jq -c .ready)"
+check "select: a sprint on a milestone with no ready issues takes none" "[]" "$(sprun bash "$root/scripts/sprint-select.sh" v9 2>/dev/null | jq -c .ready)"
+rm -f "$sp/issues/13.json" "$sp/issues/14.json"
 check "select: paired issues in the finish-line milestone only, not needs:human" "[7,11]" "$(jq -c .paired <<<"$local_sel")"
 check "select: no milestone -> no paired issues" "[]" "$(sprun bash "$root/scripts/sprint-select.sh" 2>/dev/null | jq -c .paired)"
 echo '[{"number": 91, "headRefName": "issue-7", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": ""}]' > "$sp/prs.json"
@@ -524,20 +536,26 @@ check "select: a paired issue with an open loop PR is busy" "[11]" "$(sprun bash
 rm -f "$sp/prs.json"
 
 # ---------- sprint-next.sh: what to start now ----------
-# Ready queue [5,3,2,10] (#10's PR is gone now), paired [7,11]. Scopes: 5 and 3 share
-# internal/a/, 2 and 7 name their own files, 10 and 11 name none (each runs alone).
+# All in milestone v0.3.0 now (the sprint's scope), so the nightly type order decides:
+# ready queue [3,2,5,10] (bug, feature, docs, none; #10's PR is gone now), paired
+# [7,11]. Scopes: 3 and 5 share internal/a/, 2 and 7 name their own files, 10 and 11
+# name none (each runs alone).
+for i in 3 2 10; do jq '.milestone = {number: 3, title: "v0.3.0"}' "$sp/issues/$i.json" > "$sp/i" && mv "$sp/i" "$sp/issues/$i.json"; done
 for i in 5 3 2 7 11; do
   case $i in 5) b="Fix internal/a/x.go";; 3) b="Change internal/a/";; 2) b="Touch cmd/b.go";; 7) b="See docs/c.md";; 11) b="Make it faster";; esac
   jq --arg b "$b" '.body = $b' "$sp/issues/$i.json" > "$sp/i" && mv "$sp/i" "$sp/issues/$i.json"
 done
 nx() { sprun bash "$root/scripts/sprint-next.sh" "$@" 2>/dev/null | jq -c '[(.start | map("\(.issue):\(.kind)")), (.skipped | map(.issue))]'; }
-check "next: queue order, overlap skipped, up to the limit" '[["5:ready","2:ready"],[3,10,7,11]]' "$(nx 2 v0.3.0)"
-check "next: with 3 slots the paired issue in the milestone comes in" '[["5:ready","2:ready","7:paired"],[3,10,11]]' "$(nx 3 v0.3.0)"
+check "next: queue order, overlap skipped, up to the limit" '[["3:ready","2:ready"],[5,10,7,11]]' "$(nx 2 v0.3.0)"
+check "next: with 3 slots the paired issue in the milestone comes in" '[["3:ready","2:ready","7:paired"],[5,10,11]]' "$(nx 3 v0.3.0)"
 check "next: an in-flight issue is not started again and blocks overlapping work" '[["2:ready","7:paired"],[3,10,11]]' "$(nx 3 v0.3.0 5)"
 echo '[{"number": 92, "headRefName": "issue-2", "isCrossRepository": false, "author": {"login": "tonhe"}, "files": [{"path": "docs/c.md"}]}]' > "$sp/prs.json"
-check "next: files an in-flight PR already changes count as its scope" '[["5:ready"],[3,10,7,11]]' "$(nx 3 v0.3.0 2)"
+check "next: files an in-flight PR already changes count as its scope" '[["3:ready"],[5,10,7,11]]' "$(nx 3 v0.3.0 2)"
 rm -f "$sp/prs.json"
 check "next: the limit is 1 to 3" "2|2" "$(sprun bash "$root/scripts/sprint-next.sh" 4 v0.3.0 >/dev/null 2>&1; echo $?)|$(sprun bash "$root/scripts/sprint-next.sh" 2 v0.3.0 'x' >/dev/null 2>&1; echo $?)"
+for i in 3 2 10; do jq '.milestone = null' "$sp/issues/$i.json" > "$sp/i" && mv "$sp/i" "$sp/issues/$i.json"; done
+check "next: issues outside the finish-line milestone are never started (#55)" "[]|true" \
+  "$(sprun bash "$root/scripts/sprint-next.sh" 3 v0.3.0 2>/dev/null | jq -c '[.start[].issue, .skipped[].issue] - [5,7,11]')|$(sprun bash "$root/scripts/sprint-next.sh" 3 v0.3.0 2>/dev/null | jq -c '[.start[].issue] | index(5) != null')"
 
 # ---------- sprint-progress.sh: Discord line + one comment on the Release issue ----------
 mkissue 12 release "Release v0.3.0 <!-- agent-release -->" v0.3.0 tonhe 12
