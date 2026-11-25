@@ -11,11 +11,15 @@ if [[ -z "$changed" ]]; then
   echo "No changes."
   exit 2
 fi
-echo "Changed files:"; sed 's/^/  /' <<<"$changed"
+echo "Changed files:"
+# shellcheck disable=SC2001  # indents every line of a multi-line list
+sed 's/^/  /' <<<"$changed"
 
 mapfile -t specs < <(printf '%s\n' ".github/" "${PROTECTED_PATHS:-}" | sed '/^[[:space:]]*$/d')
 bad=$(git diff --cached --name-only -- "${specs[@]}" || true)
 if [[ -n "$bad" ]]; then
-  echo "::error::Agent touched protected paths:"; sed 's/^/  /' <<<"$bad"
+  echo "::error::Agent touched protected paths:"
+  # shellcheck disable=SC2001  # indents every line of a multi-line list
+  sed 's/^/  /' <<<"$bad"
   exit 1
 fi
