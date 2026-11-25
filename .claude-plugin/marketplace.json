@@ -1,0 +1,8 @@
+{
+  "name": "agent-loop",
+  "owner": { "name": "tonhe" },
+  "plugins": [
+    { "name": "agent-loop", "source": "./",
+      "description": "Sprint mode for agent-loop: local coordinator, work-issue subagents, review pass, script-backed merge gate." }
+  ]
+}

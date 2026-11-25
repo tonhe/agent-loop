@@ -1,0 +1,8 @@
+{
+  "name": "agent-loop",
+  "description": "Sprint mode for agent-loop: a local coordinator and subagents that work owner issues under the same rules and gates as the nightly loop. Merges only through merge-gate.sh.",
+  "author": { "name": "tonhe" },
+  "homepage": "https://github.com/tonhe/agent-loop",
+  "repository": "https://github.com/tonhe/agent-loop",
+  "license": "MIT"
+}

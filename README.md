@@ -55,6 +55,12 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Auto-merge can't skip checks | `enable-automerge.sh` refuses unless the PR's own base branch has required checks and an empty bypass list |
 | Releases need a human | `environment: release` with you as required reviewer; PAT has no Deployments permission |
 | Digest can't ping anyone | `discord.sh` sets `allowed_mentions.parse = []` |
+| Sprint mode merges only through the merge gate: required checks green on the head, no protected or process path, an Owner decision where `protected_review_paths` need one, the owner's live-check answer where one is pending, the issue not `needs:human`, no conflicts, up to date if the ruleset says so; never in agent-loop itself | `scripts/merge-gate.sh` decides with `lib/merge-gate.jq`, reading settings from the caller workflows on the PR's base (`loop-config.sh`); the plugin's guard hook blocks `gh pr merge`, the merge API and `enable-automerge.sh` |
+| A sprint agent cannot speak for the owner, undo a stop or loosen a gate | `hooks/guard.sh` (PreToolUse, subagents included): no comment beginning `Owner decision` or `Live check passed/failed`, no removing `needs:human` or `agent:live-check`, no ruleset or branch-protection writes, no edits to the installed plugin |
+| Local and nightly runs pick the same work and never the same issue at once | `sprint-select.sh` runs `select-issues.sh scheduled` unchanged; `claim-issue.sh` uses `agent:in-progress`, which the nightly selection skips |
+| No two sprint subagents on the same files | `sprint-next.sh`, `lib/sprint.jq` (`pick_parallel`): overlapping scopes wait; an issue that names no file runs alone |
+| A sprint subagent stops instead of touching protected code without a decision | `scope-check.sh`, then `claim-issue.sh stop` (comment, `needs:human`, claim released) |
+| Nothing a subagent noticed is left unfiled | `check-report.sh`, `lib/sprint.jq` (`report_problems`): a noted item without an issue URL, or a bare `#N`, rejects the report |
 
 ## One-time setup (account level)
 
@@ -314,6 +320,79 @@ The blocking check applies to loop PRs only: opened by you, not from a fork, on 
 - Next to the list the section quotes your comments beginning `Owner decision` found on the linked issues that were accepted as context (yours, not Release or Plan issues), each under its issue number, "for the owner to judge", or says that none was found. They are not checked against the diff.
 - The check never fails for this, and the loop's blocking comment is never posted. The reviewer is told to look at those files with extra care and that approval is your call.
 
+## Sprint mode (local)
+
+The nightly loop makes one careful pass a night. To push a milestone through faster, run a sprint from a local Claude Code session: a coordinator picks issues the way the nightly run does, dispatches up to three subagents in parallel worktrees, reviews each PR, and merges only through a script that checks every rule. Same labels, same PR shape (`issue-N`, body marker), same CI, lab and agent-review.
+
+It is packaged in this repository as a Claude Code plugin: five skills in `skills/`, a guard hook in `hooks/`, and the scripts in `scripts/`.
+
+### Setup
+
+1. In Claude Code: `/plugin marketplace add tonhe/agent-loop`, then `/plugin install agent-loop@agent-loop`. Enable it at project scope in the repositories you sprint on. The guard hook runs in every session that has the plugin enabled.
+2. `gh auth status` must show the owner's login. A sprint acts as you on GitHub, as the nightly PAT does.
+3. `scripts/bootstrap-labels.sh owner/repo` once more, for the `agent:live-check` label.
+4. Python 3 with PyYAML, or `yq`, to read the caller workflows (`loop-config.sh`).
+
+The plugin follows this repository's default branch, not the `v1` tag the callers pin.
+
+### Running one
+
+```
+/agent-loop:sprint milestone=v0.3.0 prs=5 hours=4 parallel=2
+```
+
+- **Finish line:** a milestone with no open issue left except the loop's Release issue (`sprint-issue.sh finish`).
+- **Budget:** merged PRs AND hours; the sprint stops at whichever comes first. Defaults 5 PRs, 4 hours.
+- **Parallel:** default 2, at most 3.
+
+The coordinator loops: pick (`sprint-next.sh`), dispatch `work-issue` subagents, check each report (`check-report.sh`), review (`review-pr`, at most one fix round), gate (`merge-gate.sh`), and after each merge post a progress line (`sprint-progress.sh`: Discord, and one comment on the Release issue edited in place). It never waits on a decision. It stops at the finish line, at the budget, or when nothing is selectable, and reports: merged, left open (with the gate's reasons), waiting on your live check (with the exact commands), stopped for a decision, process issues filed.
+
+### What it picks
+
+- The nightly selection, unchanged: `sprint-select.sh` runs `select-issues.sh scheduled` with the caller's settings. Its first `max_issues` entries are what tonight's run would pick; the sprint takes the whole queue in that order.
+- Plus `agent:paired` issues in the finish-line milestone. The nightly run never takes them; a sprint may.
+- Never two subagents on the same files. An issue's files are the paths its body and your comments (the assessment included) name, plus every file its open PR already changes. Overlapping issues wait. An issue that names no file runs alone.
+- A claim is the nightly job's `agent:in-progress` label (`claim-issue.sh`), so a sprint and the nightly run never take the same issue.
+
+### Each subagent (`work-issue`)
+
+Claim; read the issue through `issue-context.sh` (your comments only); stay inside the newest `Owner decision`; tests first, shown to fail; implement; the verify command; `scope-check.sh`; publish through `sprint-publish.sh`, which builds the change in a fresh worktree of the base with hooks off, refuses protected paths (`check-diff.sh`) and opens the PR with `publish-pr.sh`; file everything it noticed (`file-found.sh`); report as JSON with full URLs. A subagent that needs a protected file without a decision stops: `claim-issue.sh stop` comments on the issue with what is needed, adds `needs:human`, removes `agent:ready` and releases the claim.
+
+### The merge gate
+
+`scripts/merge-gate.sh PR` is the only merge path. It refuses, and lists every reason, unless:
+
+- the PR is an open, non-draft loop PR (yours, from this repository, branch `issue-N`, marker agreeing), and the repository is not agent-loop
+- issue N is open, yours, not a Release or Plan issue, and not `needs:human`
+- every required status check of the base branch's rulesets succeeded on the head commit (pending, missing, skipped and neutral refuse)
+- no file matches `protected_paths` (git pathspecs, as `check-diff.sh`) or the loop's process paths (`.github/`, `.claude/`, `.claude-plugin/`, `.mcp.json`, any `CLAUDE.md` or `AGENTS.md`, `RELEASING.md`), and none matches `protected_review_paths` unless issue N has an Owner decision
+- a PR labeled `agent:live-check` has your answer for its current head (below)
+- no merge conflict, and the head is up to date when the ruleset requires it
+
+Settings come from the caller workflows on the PR's base branch, so a PR cannot loosen the rules it is checked against. A protection list it cannot read (a missing caller, a `${{ }}` expression) refuses. On success it calls `enable-automerge.sh`; GitHub still merges only when the required checks pass. `--check` decides without turning anything on.
+
+### Live checks
+
+Some work needs you: sudo, a live network, real hardware. The subagent does the code and tests, opens the PR and names the commands; `sprint-publish.sh` labels the PR `agent:live-check` and comments the commands. The sprint carries on. Run the commands on the PR head, then comment on the PR:
+
+```
+Live check passed 0123abc
+```
+
+(`Live check failed 0123abc: why` to refuse.) The comment must begin with the phrase and name at least the first 7 characters of the head commit; a push after it makes it stale, and the newest answer counts. Then run the gate again, or let the next sprint pass do it.
+
+### What it cannot do, and the limits
+
+- It cannot merge without the gate, change the gate, its settings, rulesets or the plugin, remove `needs:human` or `agent:live-check`, or write a comment that begins `Owner decision` or `Live check passed/failed`. The guard hook blocks these, in subagents too.
+- It does not replace the nightly loop, and it never works an issue someone else opened.
+- **The agent acts as you on GitHub.** A comment it posts carries your login, so no script can tell your `Owner decision` or live-check answer from one the agent wrote. The guard hook stops the obvious ways; it is a text match, and a determined shell trick can get past it. What GitHub itself enforces is the ruleset: required checks (tests, lab, agent-review) and an empty bypass list. The gate's other rules (protected review paths, live check, `needs:human`, process paths) hold only as long as the agent goes through the gate. Read the final report.
+- Commands you type with `!` in the prompt are not tool calls; the guard does not check them. That is your way to merge by hand.
+- The file-overlap check reads paths from issue text. Work that strays outside the named files can still collide; the gate then refuses on the merge conflict.
+
+### Unattended sprint cadence
+
+Separate from the skills: the Worker has a sprint switch (`SPRINT=on`) that adds the dev selection every 2 hours and triage every 6, same rules. See `worker/README.md`.
+
 ## Adapting to another language
 
 Set `verify_command`, `bash_allow`, `protected_paths`, and either `go_version_file` or `setup_command`. Example for a C project built with make:
@@ -335,7 +414,7 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, selection-order, candidate (closed blockers, Owner decisions, paired-epic children), dependency, blocker-audit, base-branch, milestone, plan-validation, plan-apply (including a failed `gh` call), release, planning, protected-path, PR-to-issue mapping, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, backlog-wait, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean. The Worker has its own tests: `npm test` in `worker/` (Node 20 or later, no dependencies).
+`bash test/run.sh` runs offline tests (sprint mode's in `test/sprint.sh`: merge gate, loop config, claims, scope check, reports, local selection, overlap, progress, guard hook) of the selection, selection-order, candidate (closed blockers, Owner decisions, paired-epic children), dependency, blocker-audit, base-branch, milestone, plan-validation, plan-apply (including a failed `gh` call), release, planning, protected-path, PR-to-issue mapping, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, backlog-wait, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean. The Worker has its own tests: `npm test` in `worker/` (Node 20 or later, no dependencies).
 
 ## Known limits and residual risk
 
