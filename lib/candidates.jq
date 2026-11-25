@@ -26,6 +26,10 @@ def is_assessment: (.body // "") | contains("<!-- agent-assessment -->");
   | {
       number, title, body,
       labels: [.labels[].name],
+      # Blockers the body names that are closed now. A candidate is never blocked, so every
+      # numbered blocker in its body is one of these. Without this fact the model reads
+      # "Blocked by #4" in the body and triages the issue as if #4 were still open.
+      closed_blockers: [(.body | blockers)[] | select(. > 0)],
       owner_comments: [$mine[] | {createdAt, body}],
       previous_assessment: ($a.body // null)
     }

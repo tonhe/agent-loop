@@ -15,7 +15,11 @@ repo=$GITHUB_REPOSITORY
 dry=${DRY_RUN:-false}
 max_new=${MAX_NEW_ISSUES:-10}
 
-run() { if [[ $dry == true ]]; then echo "DRY: $*" >&2; else "$@"; fi; }
+# This script's stdout is the digest, and nothing else may be written to it. gh prints the
+# issue URL on `issue edit` and `issue comment`; those would land at the top of the digest,
+# where Discord turns each one into a preview card. So run() sends a command's stdout to
+# stderr (the job log). A call whose output is needed (issue create) does not use run().
+run() { if [[ $dry == true ]]; then echo "DRY: $*" >&2; else "$@" >&2; fi; }
 
 allowed=$(jq -c '[.[].number]' "$w/candidates.json")
 jq --argjson allowed "$allowed" \
