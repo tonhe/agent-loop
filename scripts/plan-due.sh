@@ -51,7 +51,7 @@ if [[ $(jq -r .due "$w/planning.json") == true ]]; then
   title=$(jq -r .title "$w/planning.json")
   [[ "$title" =~ ^Plan\ v[0-9]+\.[0-9]+$ ]] || { echo "::error::unexpected plan title" >&2; exit 1; }
   closed=$(gh issue list -R "$repo" --state closed --author "$owner" --search "\"$title\" in:title" \
-             --limit 50 --json number,title,author) || {
+             --limit 50 --json number,title,author,body) || {
     echo "::warning::Could not search closed issues; milestone planning is off for this run." >&2
     off "closed issues could not be searched"; }
   decide "$closed" > "$w/planning.json"

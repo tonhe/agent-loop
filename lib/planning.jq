@@ -11,7 +11,7 @@ include "release";
 #   {tags: [tag names],
 #    milestones: [open milestones {number, title, due_on, open_issues, closed_issues}],
 #    issues: [open issues {number, title, body, author, labels, milestone}],
-#    closed_plans: [closed issues {number, title, author}]   optional}
+#    closed_plans: [closed issues {number, title, body, author}]   optional}
 #   $roadmap: path of the roadmap file, "" when the repository has none
 #   -> {due, reason, version, title, existing, active, facts}
 # Due when the active milestone (lib/milestone.jq) has $threshold or fewer open issues
@@ -31,7 +31,12 @@ def plan_due($owner; $threshold; $roadmap):
     else
       ($tag | next_minor) as $version
       | "Plan \($version)" as $title
-      | ([(.issues[], (.closed_plans // [])[]) | select(.title == $title and .author.login == $owner) | .number] | sort | .[0]) as $existing
+      # A Plan issue the loop filed: exact title, the owner as author AND the marker
+      # plan_body puts in the body. A title alone is not enough: split children and
+      # found issues are filed under the owner's name with model-written titles.
+      | ([(.issues[], (.closed_plans // [])[])
+          | select(.title == $title and .author.login == $owner and ((.body // "") | contains("<!-- agent-plan -->")))
+          | .number] | sort | .[0]) as $existing
       | if $existing != null then
           off("#\($existing) \($title) already exists") | .existing = $existing | .version = $version | .title = $title
         else

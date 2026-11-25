@@ -18,7 +18,8 @@ open_titles=$(gh issue list -R "$repo" --state open --limit 500 --json title --j
 filed=0
 while read -r item; do
   (( filed >= max )) && { echo "- cap of $max reached; rest left in the run log"; break; }
-  title=$(jq -r '.title' <<<"$item" | head -c 200)
+  # The model wrote the title and the body: no Release/Plan look-alike title, no forged marker.
+  title=$(jq -r -L "$here/lib" 'include "meta"; .title | safe_title | .[:200]' <<<"$item")
   if jq -e --arg t "$title" 'index($t | ascii_downcase) != null' <<<"$open_titles" >/dev/null; then
     echo "- skipped (dup): $title"; continue
   fi
@@ -26,7 +27,7 @@ while read -r item; do
   [[ -n $pr ]] && origin+=" ($pr)"
   body="$origin.
 
-$(jq -r -L "$here/lib" 'include "base"; .body | defang_base' <<<"$item")
+$(jq -r -L "$here/lib" 'include "base"; include "meta"; .body | defang_base | defang_markers' <<<"$item")
 
 <!-- agent-found from=$src -->"
   if [[ ${DRY_RUN:-false} == true ]]; then

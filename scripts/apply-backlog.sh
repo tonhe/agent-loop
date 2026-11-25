@@ -50,9 +50,10 @@ while read -r a; do
   while read -r s; do
     [[ -z $s ]] && continue
     if (( new_issues >= max_new )); then body+=$'\n(Split limit reached for this run.)\n'; break; fi
-    t=$(jq -r '.title' <<<"$s")
-    # The model wrote this body; a Base: line in it must not steer a later dev run.
-    b="$(jq -r -L "$here/lib" 'include "base"; .body | defang_base' <<<"$s")"$'\n\nSplit from #'"$n"
+    # The model wrote this title and body. The title must not read as a Release or Plan
+    # issue, a Base: line must not steer a later dev run, and no agent marker may be forged.
+    t=$(jq -r -L "$here/lib" 'include "meta"; .title | safe_title' <<<"$s")
+    b="$(jq -r -L "$here/lib" 'include "base"; include "meta"; .body | defang_base | defang_markers' <<<"$s")"$'\n\nSplit from #'"$n"
     if [[ $dry == true ]]; then url="DRY-new-issue"; echo "DRY: create issue '$t'" >&2
     else url=$(gh issue create -R "$repo" --title "$t" --body "$b"); fi
     children+=("$url"); new_issues=$((new_issues + 1))
@@ -90,9 +91,15 @@ if [[ -s "$w/planning.json" && $(jq -r '.due' "$w/planning.json") == true ]]; th
     plan_line="- planning: unexpected plan title; nothing filed"
   elif ! jq -e '(.planning // null) | type == "object"' "$w/claude/result.json" >/dev/null 2>&1; then
     plan_line="- planning: \`$ptitle\` was due but the plan carried no proposal; it will be asked for again next run"
+  # The proposal is model output and may not have the shape plan_body expects (a list
+  # that is a string, say). That costs the Plan issue for tonight, not the triage digest.
+  elif ! jq -r -L "$here/lib" --slurpfile p "$w/planning.json" 'include "planning"; .planning | plan_body($p[0])' \
+         "$w/claude/result.json" > "$w/plan-body.md" 2>"$w/plan-body.err" || [[ ! -s "$w/plan-body.md" ]]; then
+    rm -f "$w/plan-body.md"
+    # jq's message can quote model text, so it stays in the file and out of the annotation.
+    echo "::warning::The planning proposal could not be rendered (jq said so in plan-body.err); no Plan issue filed." >&2
+    plan_line="- planning: proposal could not be rendered; nothing filed. \`$ptitle\` will be asked for again next run"
   else
-    jq -r -L "$here/lib" --slurpfile p "$w/planning.json" 'include "planning"; .planning | plan_body($p[0])' \
-      "$w/claude/result.json" > "$w/plan-body.md"
     if [[ $dry == true ]]; then
       echo "DRY: create issue '$ptitle' (needs:human, assigned to $OWNER_LOGIN)" >&2
       plan_line="- planning: would open \`$ptitle\` (dry run)"
