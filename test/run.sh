@@ -213,21 +213,29 @@ gate() {  # head ref, body, [fork], [author] -> "exit|outputs"
       bash "$root/scripts/review-gate.sh" >/dev/null 2>&1 )
   echo "$?|$(paste -sd, "$gt/out")"
 }
-check "gate: agent branch and matching marker -> review issue N" "0|run=true,issue=36" "$(gate issue-36 $'Fix.\n\nCloses #36\n\n<!-- agent-loop issue=36 -->')"
+check "gate: agent branch and matching marker -> loop mode, review issue N" "0|run=true,mode=loop,issue=36" "$(gate issue-36 $'Fix.\n\nCloses #36\n\n<!-- agent-loop issue=36 -->')"
 check "gate: a second marker naming another issue fails closed" "1|" \
   "$(gate issue-36 $'agent-loop issue=77\n\nCloses #36\n\n<!-- agent-loop issue=36 -->')"
 check "gate: the number comes from the branch; a marker for another issue fails closed" "1|" "$(gate issue-36 '<!-- agent-loop issue=77 -->')"
 check "gate: a marker that only starts with the number does not agree" "1|" "$(gate issue-36 '<!-- agent-loop issue=360 -->')"
 check "gate: agent branch without the marker fails closed" "1|" "$(gate issue-36 'Fix.')"
 check "gate: marker on a branch that is not the agent's fails closed" "1|" "$(gate feat/x '<!-- agent-loop issue=36 -->')"
-check "gate: the owner's own PR passes straight through" "0|run=false" "$(gate feat/x 'My change.')"
+check "gate: the owner's own PR -> owner mode, no issue from the gate" "0|run=true,mode=owner" "$(gate feat/x 'My change.')"
+check "gate: an owner PR with issue references but no marker -> owner mode" "0|run=true,mode=owner" "$(gate feat/x $'My change.\n\nFixes #36')"
+check "gate: an owner PR with an empty body -> owner mode" "0|run=true,mode=owner" "$(gate feat/x '')"
 check "gate: a fork PR passes straight through" "0|run=false" "$(gate issue-36 '<!-- agent-loop issue=36 -->' true)"
+check "gate: a fork PR without a marker passes straight through, even from the owner" "0|run=false" "$(gate feat/x 'My change.' true)"
 check "gate: someone else's PR passes straight through" "0|run=false" "$(gate issue-36 '<!-- agent-loop issue=36 -->' false mallory)"
-check "gate: a branch that merely starts with issue- is not the agent's" "0|run=false" "$(gate issue-36-rework 'x')"
+check "gate: someone else's PR on an ordinary branch passes straight through" "0|run=false" "$(gate feat/x 'Fixes #36' false mallory)"
+check "gate: a login that only starts with the owner's is not the owner" "0|run=false" "$(gate feat/x 'x' false tonhe2)"
+check "gate: no owner_login configured -> nothing is reviewed" "0|run=false" \
+  "$( : > "$gt/out"; ( cd "$gt" && HEAD_REF=feat/x BODY=x FORK=false AUTHOR= OWNER_LOGIN= GITHUB_OUTPUT="$gt/out" bash "$root/scripts/review-gate.sh" >/dev/null 2>&1 ); echo "$?|$(paste -sd, "$gt/out")")"
+check "gate: a branch that merely starts with issue- is not the agent's: owner mode" "0|run=true,mode=owner" "$(gate issue-36-rework 'x')"
 check "gate: issue-0 and leading zeros are not agent branches" "1|" "$(gate issue-036 '<!-- agent-loop issue=36 -->')"
-check "gate: shell syntax in the branch name or body is never run" "0|run=false|no" \
+check "gate: shell syntax in the branch name or body is never run" "0|run=true,mode=owner|no" \
   "$(gate 'x$(touch pwned);touch pwned' '$(touch pwned) `touch pwned`')|$([[ -e "$gt/pwned" ]] && echo yes || echo no)"
-check "gate: a newline in the branch name cannot smuggle an agent branch" "0|run=false" "$(gate $'x\nissue-36' 'x')"
+check "gate: a newline in the branch name cannot smuggle an agent branch" "0|run=true,mode=owner" "$(gate $'x\nissue-36' 'x')"
+check "gate: a body cannot write extra outputs (mode is the script's own word)" "0|run=true,mode=owner" "$(gate feat/x $'x\nmode=loop\nissue=1')"
 rm -rf "$gt"
 rv_yml="$root/.github/workflows/review.yml"
 check "review.yml: the head branch reaches the gate through env only" "1|0" \
