@@ -535,6 +535,146 @@ check "advisory: no command -> an error in every mode but owner" "0|1" \
   "$( ( MODE=owner bash "$root/scripts/advisory.sh" >/dev/null 2>&1 ); echo $?)|$( ( MODE=loop bash "$root/scripts/advisory.sh" >/dev/null 2>&1 ); [[ $? -ne 0 ]] && echo 1 || echo 0)"
 rm -rf "$pw"
 
+# ---------- prompts per group and the Claude calls (review-prompts.sh, review-calls.sh) ----------
+sc() { jq -r -L "$root/lib" --argjson i "$2" --argjson m "${3:-400}" 'include "review"; scope_section($i; $m)' <<<"$1"; }
+sc_plan='{"split":true,"capped":false,"uncapped":3,"total_files":5,"total_lines":50,"groups":[{"name":"a/","paths":["a/1.go","a/2.go"],"files":2,"lines":20},{"name":"b/","paths":["b/we`ird\nname.go"],"files":1,"lines":10},{"name":"c/","paths":["c/1.go","c/2.go"],"files":2,"lines":20}]}'
+out=$(sc "$sc_plan" 0)
+check "scope: says which part this is and how large the PR is" "1|1" \
+  "$(grep -c 'This is part 1 of 3: `a/` (2 files, 20 changed lines)\.' <<<"$out")|$(grep -c '5 files, 50 changed lines' <<<"$out")"
+check "scope: lists the other parts' paths and not its own" "0|1|2" "$(grep -c '^- `a/' <<<"$out")|$(grep -c '^- `b/' <<<"$out")|$(grep -c '^- `c/' <<<"$out")"
+check "scope: a path from the PR stays one line inside a code span" "1" "$(grep -c "^- \`b/we'ird name.go\`\$" <<<"$out")"
+check "scope: a long list is cut and counted" "2|1" "$(sc "$sc_plan" 1 2 | grep -c '^- `')|$(sc "$sc_plan" 1 2 | grep -c '2 more file(s) not listed')"
+check "scope: one group -> no scope section" "" "$(sc '{"split":false,"groups":[{"name":"all","paths":["a"],"files":1,"lines":1}],"total_files":1,"total_lines":1}' 0)"
+
+rq=$(mktemp -d); mkdir -p "$rq/bin" "$rq/repo" "$rq/w"
+cat > "$rq/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GHLOG"
+case "$1 $2" in
+  "issue view") printf '%s' "$V_ISSUE" ;;
+  "pr comment") while [[ $# -gt 0 ]]; do [[ "$1" == --body-file ]] && cp "$2" "$GHLOG.body"; shift; done ;;
+esac
+GH
+# Stands in for the Claude CLI: fails when the prompt holds FAILME, blocks on BLOCKME.
+cat > "$rq/bin/claude" <<'CL'
+#!/usr/bin/env bash
+p=$(cat)
+echo "call env_gh=${GH_TOKEN:-none}" >> "$CLAUDE_LOG"
+if grep -q 'FAILME' <<<"$p"; then echo "boom" >&2; exit 1; fi
+v=pass; grep -q 'BLOCKME' <<<"$p" && v=block
+jq -n --arg v "$v" '{is_error: false, subtype: "success", num_turns: 1, usage: {}, structured_output: {verdict: $v, summary: "stub review", findings: []}}'
+CL
+chmod +x "$rq/bin/"*
+( cd "$rq/repo" && git init -q && git config user.email t@t && git config user.name t
+  mkdir -p cmd internal/a && echo base > README.md && echo base > cmd/main.go && git add -A && git commit -qm base )
+rq_base=$(git -C "$rq/repo" rev-parse HEAD)
+( cd "$rq/repo" && echo change >> README.md && echo change >> cmd/main.go && echo new > internal/a/one.go && git add -A && git commit -qm small )
+rq_issue='{"number":36,"title":"Loop issue","author":{"login":"tonhe"},"labels":[],"body":"LOOP ISSUE BODY","comments":[]}'
+rqp() {  # mode, [issue]: runs review-prompts.sh in the fixture repo
+  rm -rf "$rq/w/groups" "$rq/w/plan.json"; : > "$rq/log"
+  ( cd "$rq/repo" && PATH="$rq/bin:$PATH" GHLOG="$rq/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe MODE="$1" ISSUE="${2:-}" BASE_SHA="${RQ_BASE-$rq_base}" \
+      V_ISSUE="${V_ISSUE-$rq_issue}" VERIFY_COMMAND='make test-all' PLATFORMS=Linux bash "$root/scripts/review-prompts.sh" "$rq/w" > "$rq/stdout" 2>&1 )
+}
+rqp loop 36; rc=$?
+check "review-prompts: a small loop PR -> one prompt, not split" "0|false|1" "$rc|$(jq -r .split "$rq/w/plan.json")|$(find "$rq/w/groups" -name prompt.md | wc -l | tr -d ' ')"
+p0="$rq/w/groups/0/prompt.md"
+check "review-prompts: loop prompt = loop header, the issue, the whole diff, nothing about parts" "1|1|1|3|0" \
+  "$(grep -c 'another agent wrote to resolve the issue below' "$p0")|$(grep -c '^## Issue$' "$p0")|$(grep -c '^LOOP ISSUE BODY$' "$p0")|$(grep -c '^diff --git ' "$p0")|$(grep -c 'Scope of this review' "$p0")"
+check "review-prompts: the loop issue is read through issue-context.sh" "1" "$(grep -c '^issue view 36 -R o/r --json number,title,body,author,labels,comments$' "$rq/log")"
+mkdir -p "$rq/w/protected"; printf '## Protected paths\n\nLOOP SECTION\n' > "$rq/w/protected/section.md"; printf '#### Protected paths\n\nOWNER SECTION\n' > "$rq/w/protected/owner-section.md"
+rqp loop 36
+check "review-prompts: loop prompt carries the loop's protected section only" "1|0" "$(grep -c '^LOOP SECTION$' "$p0")|$(grep -c 'OWNER SECTION' "$p0")"
+V_ISSUE='{"number":36,"title":"x","author":{"login":"mallory"},"labels":[],"body":"STRANGER","comments":[]}' rqp loop 36; rc=$?
+check "review-prompts: loop, an issue that is not the owner's -> fails, no prompt" "1|0" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)|$(find "$rq/w" -name prompt.md | wc -l | tr -d ' ')"
+rqp loop ''; rc=$?
+check "review-prompts: loop without an issue number fails" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+mkdir -p "$rq/w/linked"; printf '### #12: Mine\n\nOWNER ISSUE BODY\n' > "$rq/w/linked/issues.md"
+rqp owner; rc=$?
+check "review-prompts: owner prompt = owner header, the linked issues, the owner section, the diff; GitHub is not called" "0|1|1|1|0|3|0" \
+  "$rc|$(grep -c 'This review is advisory' "$p0")|$(grep -c '^OWNER ISSUE BODY$' "$p0")|$(grep -c '^OWNER SECTION$' "$p0")|$(grep -c 'LOOP SECTION' "$p0")|$(grep -c '^diff --git ' "$p0")|$(wc -l < "$rq/log" | tr -d ' ')"
+check "review-prompts: no placeholder is left in either header" "0" "$(grep -c '{{' "$p0")"
+rm -rf "$rq/w/linked" "$rq/w/protected"
+rqp owner; rc=$?
+check "review-prompts: owner with no linked-issue output -> says to review the diff alone" "0|1" "$rc|$(grep -c 'Review the diff on its own' "$p0")"
+RQ_BASE='HEAD; touch pwned' rqp owner; rc=$?
+check "review-prompts: a base that is not a commit id is refused" "1|no" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)|$([[ -e "$rq/repo/pwned" ]] && echo yes || echo no)"
+SPLIT_MAX_FILES=abc SPLIT_MAX_LINES='' SPLIT_MAX_CALLS='1; touch pwned' SPLIT_MAX_DIFF_BYTES=-4 rqp owner; rc=$?
+check "review-prompts: thresholds that are not numbers fall back to the defaults" "0|false|no" "$rc|$(jq -r .split "$rq/w/plan.json")|$([[ -e "$rq/repo/pwned" ]] && echo yes || echo no)"
+SPLIT_MAX_DIFF_BYTES=200 rqp owner
+check "review-prompts: a diff over the byte cap is cut, marked and said in the prompt" "yes|1|true" \
+  "$([[ -e "$rq/w/groups/0/truncated" ]] && echo yes || echo no)|$(grep -c '^(diff truncated' "$p0")|$(sed -n '/^```diff$/,/^```$/p' "$p0" | wc -c | awk '{print ($1 <= 220) ? "true" : "false"}')"
+rqp owner
+check "review-prompts: under the cap nothing is marked" "no|0" "$([[ -e "$rq/w/groups/0/truncated" ]] && echo yes || echo no)|$(grep -c 'diff truncated' "$p0")"
+
+# A larger PR, with file names that would hurt if they were ever evaluated or used as options.
+( cd "$rq/repo" && mkdir -p -- -dash "sp ace" odd internal/b docs
+  echo x > ./-dash/--x.go; echo x > "sp ace/a b.go"; printf 'x\n' > "$(printf 'odd/new\nline.go')"; echo x > 'odd/q"uote.go'; echo x > 'odd/$(touch pwned).go'
+  echo 'FAILME' > internal/b/bad.go; echo x > internal/b/two.go; echo x > docs/guide.md; git add -A; git commit -qm big )
+SPLIT_MAX_FILES=3 rqp owner; rc=$?
+check "review-prompts: over the file threshold -> split by directory, small groups packed" '0|true|["(root files), -dash/, cmd/","docs/, sp ace/","internal/","odd/"]' \
+  "$rc|$(jq -r .split "$rq/w/plan.json")|$(jq -c '[.groups[].name]' "$rq/w/plan.json")"
+check "review-prompts: one prompt per group" "4" "$(find "$rq/w/groups" -name prompt.md | wc -l | tr -d ' ')"
+check "review-prompts: every changed file's diff is in exactly one prompt" "11|11" \
+  "$(git -C "$rq/repo" diff --name-only --no-renames "$rq_base"...HEAD -z | tr -cd '\0' | wc -c | tr -d ' ')|$(cat "$rq/w"/groups/*/prompt.md | grep -c '^diff --git ')"
+gi=$(jq -r '[.groups[].name] | index("internal/")' "$rq/w/plan.json"); go=$(jq -r '[.groups[].name] | index("odd/")' "$rq/w/plan.json"); gr=$(jq -r '[.groups[].name] | index("(root files), -dash/, cmd/")' "$rq/w/plan.json")
+check "review-prompts: a group's prompt holds only its own files' diff" "3|3" \
+  "$(grep -c '^diff --git ' "$rq/w/groups/$gi/prompt.md")|$(grep -c '^diff --git a/internal/' "$rq/w/groups/$gi/prompt.md")"
+check "review-prompts: names with a quote, a newline or shell syntax are diffed as plain paths" "3|1|1|no" \
+  "$(grep -c '^diff --git ' "$rq/w/groups/$go/prompt.md")|$(grep -c '^diff --git "a/odd/new\\nline.go"' "$rq/w/groups/$go/prompt.md")|$(grep -c '^diff --git "a/odd/q\\"uote.go"' "$rq/w/groups/$go/prompt.md")|$([[ -e "$rq/repo/pwned" ]] && echo yes || echo no)"
+check "review-prompts: a name with leading dashes is a path, not an option" "1" "$(grep -c '^diff --git a/-dash/--x.go b/-dash/--x.go$' "$rq/w/groups/$gr/prompt.md")"
+check "review-prompts: each part has the header, the issue section, and the list of what it does not see" "4|4|4|1|0" \
+  "$(grep -l 'This review is advisory' "$rq/w"/groups/*/prompt.md | wc -l | tr -d ' ')|$(grep -l '^## Issue$' "$rq/w"/groups/*/prompt.md | wc -l | tr -d ' ')|$(grep -l '^## Scope of this review$' "$rq/w"/groups/*/prompt.md | wc -l | tr -d ' ')|$(grep -c '^- `internal/b/two.go`$' "$rq/w/groups/$go/prompt.md")|$(grep -c '^- `internal/b/two.go`$' "$rq/w/groups/$gi/prompt.md")"
+SPLIT_MAX_FILES=3 SPLIT_MAX_CALLS=2 rqp owner
+check "review-prompts: the call cap merges groups; still every file once" "2|true|11" \
+  "$(find "$rq/w/groups" -name prompt.md | wc -l | tr -d ' ')|$(jq -r .capped "$rq/w/plan.json")|$(cat "$rq/w"/groups/*/prompt.md | grep -c '^diff --git ')"
+SPLIT_MAX_LINES=4 rqp loop 36
+check "review-prompts: over the line threshold a loop PR is split too, with the loop header in every part" "true|true" \
+  "$(jq -r .split "$rq/w/plan.json")|$([[ $(grep -l 'another agent wrote' "$rq/w"/groups/*/prompt.md | wc -l) -eq $(jq '.groups | length' "$rq/w/plan.json") ]] && echo true || echo false)"
+
+rqc() {  # mode: runs review-calls.sh over the prompts in $rq/w
+  : > "$rq/claude.log"
+  ( cd "$rq/repo" && PATH="$rq/bin:$PATH" CLAUDE_LOG="$rq/claude.log" MODE="$1" MODEL=sonnet MAX_TURNS=5 TIMEOUT_MIN=1 ALLOWED_TOOLS="Read,Grep" \
+      bash "$root/scripts/review-calls.sh" "$rq/w" "$root/schemas/review.json" > "$rq/stdout" 2>&1 )
+}
+rcs() { local i; for i in $(seq 0 $(( $(jq '.groups | length' "$rq/w/plan.json") - 1 ))); do printf '%s,' "$(cat "$rq/w/groups/$i/rc" 2>/dev/null || echo -)"; done; }
+SPLIT_MAX_FILES=3 rqp owner
+rqc owner; rc=$?
+check "review-calls: owner, one of four calls fails -> exit 0, every part was still tried" "0|4|0,0,4,0," "$rc|$(wc -l < "$rq/claude.log" | tr -d ' ')|$(rcs)"
+check "review-calls: owner failure is a warning, not an error annotation of its own" "1" "$(grep -c '^::warning::1 of 4 review call(s) failed' "$rq/stdout")"
+check "review-calls: good parts have a review, the failed part has none" "pass|no" \
+  "$(jq -r .verdict "$rq/w/groups/0/result.json")|$([[ -e "$rq/w/groups/$gi/result.json" ]] && echo yes || echo no)"
+: > "$rq/log"
+( PATH="$rq/bin:$PATH" GHLOG="$rq/log" GITHUB_REPOSITORY=o/r MODE=owner HEAD_SHA=abc1234 bash "$root/scripts/review-post.sh" "$rq/w" 9 > "$rq/stdout" 2>&1 ); rc=$?
+check "end to end, owner: a failed part is noted in the one comment and the check passes" "0|### Agent review (advisory): PASS (INCOMPLETE)|1|3" \
+  "$rc|$(sed -n 2p "$rq/log.body")|$(grep -c '^#### Part 3 of 4: `internal/`: NOT REVIEWED$' "$rq/log.body")|$(grep -c '^stub review$' "$rq/log.body")"
+SPLIT_MAX_FILES=3 rqp loop 36
+rqc loop; rc=$?
+check "review-calls: loop, a failing call fails the step with Claude's exit code and stops there" "4|3|0,0,4,-," "$rc|$(wc -l < "$rq/claude.log" | tr -d ' ')|$(rcs)"
+( cd "$rq/repo" && git rm -q internal/b/bad.go && echo 'BLOCKME' > docs/guide.md && git add -A && git commit -qm fixed )
+SPLIT_MAX_FILES=3 rqp loop 36; rqc loop; rc=$?
+check "review-calls: loop, all calls succeed -> exit 0" "0|0,0,0,0," "$rc|$(rcs)"
+: > "$rq/log"
+( PATH="$rq/bin:$PATH" GHLOG="$rq/log" GITHUB_REPOSITORY=o/r MODE=loop bash "$root/scripts/review-post.sh" "$rq/w" 9 > "$rq/stdout" 2>&1 ); rc=$?
+check "end to end, loop: one part blocks -> one combined BLOCK comment, the check fails" "1|### Agent review: BLOCK|1" "$rc|$(sed -n 2p "$rq/log.body")|$(grep -c '^pr comment' "$rq/log")"
+SPLIT_MAX_FILES=3 rqp owner; rqc owner
+: > "$rq/log"
+( PATH="$rq/bin:$PATH" GHLOG="$rq/log" GITHUB_REPOSITORY=o/r MODE=owner bash "$root/scripts/review-post.sh" "$rq/w" 9 > "$rq/stdout" 2>&1 ); rc=$?
+check "end to end, owner: the same block verdict is posted as advisory and the check passes" "0|### Agent review (advisory): BLOCK" "$rc|$(sed -n 2p "$rq/log.body")"
+check "review-calls: the calls get no GitHub token from the script" "none" "$(sed 's/.*env_gh=//' "$rq/claude.log" | sort -u | paste -sd, -)"
+SPLIT_MAX_FILES=3 rqp owner
+JOB_TIMEOUT_MIN=15 rqc owner; rc=$?
+check "review-calls: no time left in the job's budget -> calls are not started; owner still exits 0" "0|0|125,125,125,125," "$rc|$(wc -l < "$rq/claude.log" | tr -d ' ')|$(rcs)"
+JOB_TIMEOUT_MIN=15 rqc loop; rc=$?
+check "review-calls: ... and loop fails" "125" "$rc"
+JOB_TIMEOUT_MIN=120 rqc owner; rc=$?
+check "review-calls: a budget with room runs every call" "0|4" "$rc|$(wc -l < "$rq/claude.log" | tr -d ' ')"
+rm -rf "$rq/w/groups" "$rq/w/plan.json"
+rqc owner; rc=$?
+check "review-calls: no plan (the prompt step failed) -> owner exits 0 with a warning, nothing is called" "0|0|1" "$rc|$(wc -l < "$rq/claude.log" | tr -d ' ')|$(grep -c '^::warning::' "$rq/stdout")"
+rqc loop; rc=$?
+check "review-calls: no plan -> loop fails" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+rm -rf "$rq"
+
 # ---------- apply-backlog.sh (stubbed gh, dry run) ----------
 ab=$(mktemp -d); mkdir -p "$ab/bin" "$ab/w/claude"
 printf '#!/usr/bin/env bash\necho "$*" >> "$GHLOG"\n' > "$ab/bin/gh"; chmod +x "$ab/bin/gh"

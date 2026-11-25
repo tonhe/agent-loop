@@ -18,6 +18,29 @@ def linked_issues($max):
   | .[:$max];
 def linked_issues: linked_issues(5);
 
+# ---------- large PRs: what one part of a split review is told ----------
+# scope_section($i; $max_list): lib/split.jq's plan -> Markdown for the prompt of group
+# $i: which part this is, and the paths of the other parts, so the model knows what it is
+# not seeing. At most $max_list paths are listed; the rest are counted. "" when the
+# review is one call. Paths come from the PR: one line each, in a code span.
+def scope_section($i; $max_list):
+  def code: tostring | gsub("`"; "'") | explode | map(if . < 32 or . == 127 then 32 else . end) | implode | "`" + . + "`";
+  (.groups | length) as $n
+  | if $n < 2 then ""
+    else
+      .groups[$i] as $me
+      | [ .groups | to_entries[] | select(.key != $i) | .key as $k | .value.paths[] | {part: ($k + 1), path: .} ] as $others
+      | [ "## Scope of this review",
+          "This pull request is large (\(.total_files) files, \(.total_lines) changed lines), so it is reviewed in \($n) parts, each by a separate reviewer. "
+          + "This is part \($i + 1) of \($n): " + ($me.name | code) + " (\($me.files) files, \($me.lines) changed lines). "
+          + "Only this part's diff is below. Judge this part, and report findings only for files in it.",
+          "The files of the other parts are listed here so that you know what you are not seeing. They are reviewed separately; read them when you need them to understand this part:",
+          ( $others[:$max_list] | group_by(.part)
+            | map("Part \(.[0].part):\n" + (map("- " + (.path | code)) | join("\n"))) | join("\n\n") ) ]
+        + (if ($others | length) > $max_list then ["(\(($others | length) - $max_list) more file(s) not listed.)"] else [] end)
+      | join("\n\n")
+    end;
+
 # ---------- the posted review ----------
 # Loop reviews and owner reviews carry different markers on their first line, so one can
 # never be taken for the other. "<!-- agent-review -->" is not a substring of the owner
