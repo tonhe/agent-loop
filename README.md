@@ -4,6 +4,7 @@ Reusable GitHub Actions workflows that run Claude Code as an unattended issue-to
 
 ```
 1:17 AM  backlog   triage the owner's issues -> labels, assessment, splits
+                   + propose: "Release vX.Y.Z" issue, "Plan vX.Y" issue (never tags, never moves milestones)
 2:17 AM  dev       up to 3 agent:ready issues, one job each -> PR as the owner
 on PR    review    Claude review (required check) + CodeRabbit
 after    followup  one fix round -> auto-merge if risk:low
@@ -22,6 +23,17 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Other people's comments never reach Claude | `issue-context.sh`, `review-context.sh` (owner, CodeRabbit, github-actions only) |
 | Backlog manager can't do anything directly | Read-only tools; returns JSON that `lib/validate-plan.jq` filters |
 | `agent:ready` only for `risk:low`; human-set labels kept; `agent:urgent` untouchable | `lib/validate-plan.jq` |
+| `agent:paired` issues are never picked by the nightly dev run and never re-routed or split by triage; the label cannot be added or removed by the plan | `lib/select.jq`, `lib/validate-plan.jq` |
+| Triage can never set a milestone | `schemas/backlog-plan.json` has no such field; `lib/validate-plan.jq` builds its output field by field, so one smuggled in is dropped; `apply-backlog.sh` never passes one to `gh` |
+| Release issues only propose: never a tag, never a GitHub release, never a deployment approval | `release-issue.sh` only creates or edits one issue; PAT has no Deployments permission |
+| Only a Release issue the loop filed is ever edited (exact title, owner as author, `release` label and the `<!-- agent-release -->` marker); one you wrote by hand is left alone and not duplicated | `lib/release.jq` (`existing_release`, `handwritten_release`) |
+| Commit messages in a Release issue are data: never evaluated, mentions and HTML comments neutralised, never at the start of a line (so never a `Base:` line) | `lib/release.jq` (`safe_line`, `release_body`), `release-issue.sh` (files and `--body-file` only) |
+| Milestone planning only proposes: no milestone created or assigned, no label changed; the Plan issue carries `needs:human` and nothing else | `plan-due.sh` (read-only), `apply-backlog.sh`, `lib/planning.jq` |
+| A plan proposal can only name the owner's issues it was offered; model text is cut to single lines and defanged | `lib/planning.jq` (`plan_due`, `plan_body`) |
+| Release and Plan issues are never triaged or worked (their text is not yours) | `lib/meta.jq`, used by `lib/candidates.jq`, `lib/select.jq`, `select-issues.sh`, `issue-context.sh` |
+| Issues the model words (split children, found issues) cannot pass for a Release or Plan issue: a title starting `Release v…` or `Plan v…` gets `Re: ` in front, and no `<!-- agent-` marker survives in the body | `lib/meta.jq` (`safe_title`, `defang_markers`), `apply-backlog.sh`, `file-found.sh`; `lib/release.jq` and `lib/planning.jq` also require their own marker before treating an issue as theirs |
+| An agent PR touching a protected-by-instruction path needs your "Owner decision" comment on the issue | `review-protected.sh`, `lib/glob.jq` block without the model; the reviewer judges scope when a decision exists |
+| The model cannot choose which issue a PR is reviewed against | `review-gate.sh` takes the number from the head branch (`issue-N`, set by `publish-pr.sh`) and fails the check unless the body marker agrees; `publish-pr.sh` neutralises `agent-loop issue=` and HTML comments in the model's PR text; `issue-context.sh` refuses Release and Plan issues |
 | No network tools, no MCP, narrow Bash allowlist | `run-claude.sh` (`--tools`, `--allowedTools`, `--strict-mcp-config`, `--permission-mode dontAsk`) |
 | Token limits | `--max-turns`, wall-clock `timeout`, job `timeout-minutes`, max issues per run, model per job |
 | Agent can't touch CI, Makefile, coverage floors | `check-diff.sh` (`.github/` always, plus `protected_paths`); PAT lacks Workflows permission |
@@ -52,7 +64,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
    - `CLAUDE_CODE_OAUTH_TOKEN`
    - `AGENT_PAT`
    - `DISCORD_WEBHOOK_URL` (optional)
-3. Labels: `scripts/bootstrap-labels.sh owner/repo`
+3. Labels: `scripts/bootstrap-labels.sh owner/repo`. Safe to re-run; run it again after upgrading to pick up new labels (`agent:paired`, `release`, `stretch`).
 4. Settings > General > Pull Requests: enable **Allow squash merging** and **Allow auto-merge**; enable **Automatically delete head branches**.
 5. Settings > Rules > Rulesets > New branch ruleset, target the default branch:
    - Enforcement: Active. **Bypass list: empty.**
@@ -74,9 +86,14 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 - **Urgent:** add the `agent:urgent` label, or `gh workflow run agent-dev.yml -f issue=N`.
 - **Dependencies:** write `Blocked by #N.` in the issue, or mark it as blocked in the issue sidebar (GitHub's native issue dependencies). Either one is enough: the issue is skipped by triage and dev until every such blocker is closed. `not blocked by #N` and a quoted "Blocked by" are ignored. A manual run (`-f issue=N`) overrides both.
 - **Base branch:** to have an issue worked on a branch other than the default, put `Base: feat/my-branch` on a line of its own in the issue body, or add a label `base:feat/my-branch`. See "Per-issue base branch" below.
-- **Milestones:** the nightly dev run takes ready issues from the most pressing open milestone first. See "Order of work" below.
+- **Milestones:** the nightly dev run takes ready issues from the most pressing open milestone first, then other milestones, then issues without one. See "Order of work" below. Triage never assigns milestones; you do.
+- **Bugs first:** set `selection_order: type` in `agent-dev.yml` so a new bug does not wait behind older feature issues. See "Order of work".
+- **Pairing with your own agent:** label an issue `agent:paired` when your interactive agent owns it. The nightly dev run never picks it up, and triage still assesses it and sets risk/type labels but leaves its routing alone: no `agent:ready`, no `needs:human`, no split, and the label itself is never added or removed by the loop. `gh workflow run agent-dev.yml -f issue=N` (and `agent:urgent`) still runs it: asking for an issue by number is your approval, the same way it overrides blockers. Remove the label to hand the issue back to the loop.
+- **Releases:** when a release looks due the backlog run opens `Release vX.Y.Z`, assigned to you. It never tags. See "Release issues".
+- **Planning:** when the active milestone runs low the backlog run opens `Plan vX.Y` with a proposal. Answer in the issue; nothing is moved for you. See "Milestone planning".
+- **Protected files:** if an agent PR is blocked for touching a protected-by-instruction path, comment on the issue starting with `Owner decision` and say what may change, then re-run the review. See "Protected by instruction".
 - **Someone else's issue:** file your own issue that links to theirs. The loop never works external issues.
-- **Found issues:** problems the dev agent notices but doesn't fix get filed as new issues (as you, labeled `agent:found`, max 3 per worked issue, duplicates by title skipped) and go through normal triage.
+- **Found issues:** problems the dev agent notices but doesn't fix get filed as new issues (as you, labeled `agent:found`, max 3 per worked issue, duplicates by title skipped) and go through normal triage. Like split children, they cannot be titled like a Release or Plan issue: such a title is filed as `Re: Release v…` / `Re: Plan v…`.
 - **Stopped work:** issues the agent gives up on get `needs:human` and a comment saying why. Too-big issues get a split suggestion.
 
 ## Dependencies
@@ -112,10 +129,95 @@ GitHub only acts on `Closes #N` when a PR merges into the default branch. When t
 
 The nightly dev run picks up to `max_issues` ready issues in this order (`lib/select.jq`):
 
-1. Issues in the preferred milestone, oldest first.
-2. Everything else (other milestones and no milestone alike), oldest first.
+1. Issues in the preferred milestone.
+2. Issues in any other open milestone.
+3. Issues with no milestone. An issue whose milestone is closed counts here.
 
-The preferred milestone is the open milestone with the earliest due date among those that have at least one ready, unblocked issue. Milestones with a due date come before those without; ties and undated milestones go by lowest milestone number. With no open milestones the order is simply oldest first.
+The preferred milestone is the open milestone with the earliest due date among those that have at least one ready, unblocked issue. Milestones with a due date come before those without; ties and undated milestones go by lowest milestone number (`lib/milestone.jq`). With no open milestones, or when the milestone list cannot be read, everything is in group 3.
+
+Inside each milestone group the order is set by the dev workflow input `selection_order`:
+
+- `oldest` (the default): oldest first by creation date. Nothing else is looked at.
+- `type`: by label group, oldest first inside each group:
+  1. `type:bug`
+  2. `tech-debt` (the plain label, not a `type:` label)
+  3. `type:refactor`, `type:chore`, `type:test`, `type:docs` (one group)
+  4. `type:feature`
+  5. issues with none of these labels
+
+  An issue that fits several groups counts in the earliest one, so a `type:bug` that is also `tech-debt` is a bug.
+
+Pick `type` when the backlog holds old feature or stretch issues: with `oldest` a bug filed today waits behind all of them, with `type` it goes next. Milestones always rank above the type group: a feature in the preferred milestone is worked before a bug with no milestone. Any other value fails the select job with an error. To turn it on, add to the `with:` block of `agent-dev.yml`:
+
+```yaml
+      selection_order: type
+```
+
+`agent:paired` issues and the loop's own Release and Plan issues are never in the list.
+
+## Release issues
+
+The backlog run looks at the commits on the default branch since the latest `vX.Y.Z` tag and, when a release is due, opens one issue titled `Release vX.Y.Z` (label `release`, assigned to `owner_login`). It proposes; you tag. `release-issue.sh` only creates or edits that issue. It never creates a tag, never creates a GitHub release and never approves a deployment.
+
+- **Tag:** the highest tag of the exact form `vX.Y.Z` by version number. Other tags (`v1`, `v1.2`, `v1.2.3-rc1`) are ignored. No such tag: nothing happens, with a note in the run summary. No commits since the tag: nothing happens.
+- **Version:** minor bump (`vX.(Y+1).0`) if any commit since the tag is a `feat` (`feat:` or `feat(scope):`) or is marked breaking (`!` before the colon, or a line starting `BREAKING CHANGE:` in the message); otherwise a patch bump. It never proposes a major bump.
+- **When:** either (a) the oldest unreleased `fix` commit landed more than 7 days ago (committer date), or (b) the open milestone that matches the proposed version (see "Would slip") has no open issues left and at least one closed one. A milestone nothing was ever put in does not count as finished, and neither does a finished milestone for another version or one that is not named after a version.
+- **Body:** why now, draft release notes (Breaking, Features, Fixes), the commits grouped by prefix (`feat`, `fix`, other prefixes by name, then commits without one), and the open issues that would slip. Each notes section and each prefix group lists up to 50 entries and counts the rest. The whole body stays at or under 60,000 characters (GitHub refuses more than 65,536): if the commit list does not fit it is cut and ends with `…and N more commit(s) not listed here`; the rest of the body is never cut.
+- **Would slip:** open issues, by number, in the matching milestone. A milestone matches when its title, trimmed, is exactly `vX.Y.Z`, `X.Y.Z`, `vX.Y` or `X.Y` for the proposed version; the full version wins over the short form. So `v1.2` matches `v1.2.0` and `v1.2.4`; `v1.2.0 beta` and `Release v1.2.0` match nothing.
+- **One issue:** an open release issue is found by exact title `Release vX.Y.Z`, you as author, the `release` label and the `<!-- agent-release -->` marker in the body, all four. If one is open its body is refreshed (only when it changed) instead of opening another; this also happens on nights when neither trigger holds, so the list stays current. If the version changed (a `feat` landed after a patch issue was opened) the same issue is retitled. An issue someone else opened with the same title is never touched. Close the issue after you tag.
+- **Your own Release issue:** an open issue of yours titled `Release vX.Y.Z` that the loop did not file (no marker, or no `release` label) is never edited. While it is open and a release for that version is due, no second issue with that title is opened and none is retitled to it; the run summary and the Discord digest say so each night. Close or rename yours to get the proposal.
+- **Discord:** one line when an issue is opened, retitled or refreshed. No webhook, or a failed post, does not fail the run.
+- **Dry run:** prints what it would do and changes nothing.
+- **Untrusted text:** commit messages are not your words. Each subject is cut to one line, `@` cannot notify, an HTML comment cannot open, and commit text is only ever placed after a prefix the script chose (a list dash, a heading), so it cannot begin a line and cannot form a `Base:` line; the body also goes through `defang_base`. The issue is never triaged and never worked by the dev agent (`lib/meta.jq`), so that text does not reach Claude.
+- **Off switch:** `release_issues: false` on the backlog workflow.
+
+Data comes from the GitHub API (tags, `compare/<tag>...<default branch>`, milestones, open issues), so the shallow checkout is enough. The `release` label is created by `bootstrap-labels.sh`; if it is missing the script creates it before filing.
+
+## Milestone planning
+
+When the active milestone has 3 or fewer open issues, the backlog run opens `Plan vX.Y` (label `needs:human`, assigned to `owner_login`) with a proposal for you to answer in the issue. It never creates a milestone, assigns one or changes a label.
+
+- **Active milestone:** the same rule as the preferred milestone in "Order of work" (`lib/milestone.jq`), but over the open milestones that still hold any open issue rather than only ready ones. If no open milestone holds an open issue, the rule runs over all open milestones. The count is GitHub's open count for the milestone.
+- **Version:** the next minor after the latest `vX.Y.Z` tag: tag `v0.2.1` gives `Plan v0.3`.
+- **Off when:** there is no open milestone, there is no `vX.Y.Z` tag, or the loop already filed a `Plan vX.Y` issue for that version (exact title, you as author, and the `<!-- agent-plan -->` marker in the body), open or closed. A closed one counts so that an answered plan is not asked again every night; rename it if you want a fresh proposal. An issue with that title that the loop did not file (one you wrote by hand, or anything without the marker) does not count, so a proposal is still opened next to it.
+- **Who decides what:** `plan-due.sh` and `lib/planning.jq` decide when. What to propose is the backlog manager's judgement: it is given the active milestone's open issues, your unmilestoned issues and your `stretch` issues (numbers, titles and labels of issues you opened, nobody else's) and the roadmap path, and reads the roadmap itself with its read-only tools.
+- **Proposal:** the next epic from the roadmap's ordered list, up to 5 unmilestoned features ranked by value and size, `stretch` issues worth promoting, and anything in the active milestone that should move out. Each item has a one-line size estimate and a recommendation.
+- **Roadmap:** `ROADMAP.md` at the repository root, or the path in `roadmap_path`. If the file does not exist the issue is still opened, without an epic, and says so.
+- **Guardrails:** the body is rendered by `lib/planning.jq`: an item naming an issue that was not offered for its section is dropped (and counted in the issue), titles come from your issues rather than from the model, model text is cut to single lines, and the result goes through `defang_base`. It is filed with the PAT in the existing apply step with the single label `needs:human`. The Plan issue is never triaged or worked afterwards. A proposal that cannot be rendered at all (the model returned the wrong shape) files nothing, the digest says `planning: proposal could not be rendered`, and triage is unaffected; it is asked for again the next night.
+- **Cost:** on a night when planning is due, Claude runs even if there is nothing to triage. If that run fails, the digest says planning was due and gives the job status; "Nothing new to triage." is only said when there was nothing for Claude to do (`scripts/backlog-digest.sh`).
+- **Dry run:** the proposal is asked for and reported; no issue is filed.
+- **Off switch:** `milestone_planning: false` on the backlog workflow.
+
+## Protected by instruction
+
+`protected_paths` (dev and followup workflows) hard-blocks the dev agent: a change to those files is discarded by `check-diff.sh`. `protected_review_paths` (review workflow) is for files the agent may change, but only when you said so for that issue. Callers pass it to `agent-review.yml`:
+
+```yaml
+      protected_review_paths: |
+        internal/probe/family.go
+        internal/sysprobe/**
+        cmd/via/*.go
+```
+
+When an agent PR changes a matching file, the review looks on the linked issue for a comment written by `owner_login` that begins with `Owner decision` (leading blank space and Markdown heading or bold marks are allowed; case matters) and names the approved scope, for example `Owner decision: family.go may change, only the fallback order.` The phrase has to stand on its own: after it comes a colon, a space, a line break or the end of the comment. A comment starting `Owner decisions are pending` or `Owner decision-making` is not a decision.
+
+- **No such comment:** `review-protected.sh` posts a blocking review comment listing each file and the pattern that protects it, and fails the `agent-review` check. Claude is not asked.
+- **A comment exists:** the matched files and your comment go into the review prompt, and the reviewer blocks if the diff goes beyond the scope you named, saying which files and why.
+
+Only your comments count, with the same filtering as `issue-context.sh`. Comments the loop posts under your name (assessments, hand-backs) carry an `<!-- agent-` marker and never count. After adding the comment, re-run the failed review job; a comment alone does not re-trigger it.
+
+Pattern syntax (`lib/glob.jq`), one per line, blank lines and `#` comments ignored:
+
+| Pattern | Matches |
+|---|---|
+| `internal/probe/family.go` | that file only |
+| `cmd/via/*.go` | `.go` files directly in `cmd/via`; `*` and `?` never cross a `/` |
+| `internal/sysprobe/**` | everything under `internal/sysprobe`; `**` crosses `/`, and `a/**/b` also matches `a/b` |
+| `internal/sysprobe/` or `internal/sysprobe` | the same: a pattern that matches a directory covers everything under it |
+
+Patterns are anchored at the repository root, match the whole path and are case-sensitive; a leading `./` or `/` is dropped. There are no `[classes]`, `{a,b}` or `!` negation. Renames count on both sides, so moving a file out of a protected directory is a change to it. A file name containing a quote, a backslash or a control character counts as protected.
+
+The check applies to agent PRs only: opened by you, not from a fork, on a head branch named `issue-N`, with the `agent-loop issue=N` marker in the body. The issue is the `N` of the branch name, which `publish-pr.sh` sets; the body is partly model text, so it is only checked for agreement (`scripts/review-gate.sh`). If the two disagree, or only one of them is there (an `issue-N` branch without the marker, a marker on another branch, a second marker naming another issue), the `agent-review` check fails rather than guessing. So do not name your own branches `issue-N`. Your other PRs and fork PRs pass straight through the review workflow as before. An empty `protected_review_paths` turns the feature off and nothing changes.
 
 ## Adapting to another language
 
@@ -138,7 +240,7 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, candidate, dependency, base-branch, milestone, plan-validation, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
+`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
 
 ## Known limits and residual risk
 
@@ -146,6 +248,9 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 - GitHub scheduled runs can start late under load.
 - Native dependencies are read up to 50 blockers per issue; an issue with more is treated as blocked.
 - A PR against a non-default base does not close its issue on merge (see "Per-issue base branch").
+- Release issues read the commit list through the compare API and open issues up to 500; planning reads the first 200 open issues.
+- A release issue is proposed from commit prefixes. Commits without a conventional prefix are listed but never raise the version.
+- Whether a diff stays inside an "Owner decision" scope is the review model's judgement. That a decision comment exists at all is checked by script.
 - Cron times are UTC; Eastern times shift by an hour at DST.
 - `make golden-update` (or similar) lets the agent regenerate golden files. The review prompt checks for weakened tests, but read golden diffs yourself.
 - The fix round trusts CodeRabbit's comments as feedback. They are still treated as code feedback, never as instructions about credentials or CI.

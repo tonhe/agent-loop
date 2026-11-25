@@ -17,5 +17,10 @@ jobs:
       owner_login: tonhe                 # CHANGE: your GitHub login
       verify_command: make test-all     # CHANGE: command that proves a change works
       platforms: Linux, macOS, and Windows
+      # Optional: files an agent PR may only change after you comment "Owner decision ..."
+      # on its issue. See "Protected by instruction" in the agent-loop README.
+      # protected_review_paths: |
+      #   internal/probe/family.go
+      #   internal/sysprobe/**
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

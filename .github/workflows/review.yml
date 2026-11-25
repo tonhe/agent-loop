@@ -1,5 +1,6 @@
 # Reusable: Claude review of agent PRs. Make the job "agent-review" a required status check.
-# Non-agent PRs and fork PRs pass straight through (they are yours to review).
+# Non-agent PRs and fork PRs pass straight through (they are yours to review); that
+# includes the protected_review_paths check, which only looks at agent PRs.
 name: agent-loop review
 
 on:
@@ -8,6 +9,7 @@ on:
       owner_login:     {type: string, required: true}
       platforms:       {type: string, default: "Linux, macOS, and Windows"}
       verify_command:  {type: string, required: true}
+      protected_review_paths: {type: string, default: "", description: "Newline-separated globs. An agent PR touching one needs an 'Owner decision' comment by the owner on its issue. Empty = off."}
       model:           {type: string, default: sonnet}
       max_turns:       {type: number, default: 25}
       timeout_minutes: {type: number, default: 15}
@@ -22,29 +24,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      # The scripts are loaded first so the gate below is the tested one (scripts/review-gate.sh).
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+
+      - name: Load agent-loop scripts outside the workspace
+        run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
+
+      # The issue number comes from the head branch name (publish-pr.sh pushes issue-N),
+      # not from the PR body, whose first part the model wrote. The body marker has to
+      # agree, or the check fails. PR text reaches the script through env only.
       - name: Is this an agent PR?
         id: gate
         env:
           BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
-        run: |
-          n=$(grep -oE 'agent-loop issue=[0-9]+' <<<"$BODY" | head -1 | grep -oE '[0-9]+' || true)
-          if [[ "$FORK" == "true" || -z "$n" || "$AUTHOR" != "$OWNER_LOGIN" ]]; then
-            echo "Not an agent PR; nothing to review here."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"; echo "issue=$n" >> "$GITHUB_OUTPUT"
-          fi
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/review-gate.sh"
 
       - if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with: {ref: "${{ github.event.pull_request.head.sha }}", persist-credentials: false, fetch-depth: 0}
 
-      - if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@v4
-        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+      # Deterministic part of the protected-by-instruction check (scripts/review-protected.sh):
+      # protected files changed and no "Owner decision" comment from the owner on the issue
+      # -> the script posts the blocking comment and fails this job; Claude is not asked.
+      # With a decision comment it writes a section for the prompt and Claude judges scope.
+      # The globs are caller input and reach the script through env only.
+      - name: Protected-by-instruction paths
+        if: steps.gate.outputs.run == 'true' && inputs.protected_review_paths != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          PROTECTED_REVIEW_PATHS: ${{ inputs.protected_review_paths }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ISSUE: ${{ steps.gate.outputs.issue }}
+          PR: ${{ github.event.pull_request.number }}
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/review-protected.sh" "$ISSUE" "$PR" "$RUNNER_TEMP/protected"
 
       - name: Build review prompt
         if: steps.gate.outputs.run == 'true'
@@ -56,9 +74,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           ISSUE: ${{ steps.gate.outputs.issue }}
         run: |
-          mv .agent-loop-src "$RUNNER_TEMP/agent-loop"; L="$RUNNER_TEMP/agent-loop"
+          L="$RUNNER_TEMP/agent-loop"
           { bash "$L/scripts/render-prompt.sh" "$L/prompts/review.md"; echo
             echo "## Issue"; bash "$L/scripts/issue-context.sh" "$ISSUE"; echo
+            if [[ -s "$RUNNER_TEMP/protected/section.md" ]]; then cat "$RUNNER_TEMP/protected/section.md"; echo; fi
             echo "## Diff"; echo '```diff'; git diff "$BASE_SHA"...HEAD; echo '```'; } > "$RUNNER_TEMP/prompt.md"
           npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
 

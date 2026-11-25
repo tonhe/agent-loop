@@ -11,7 +11,12 @@
 #  - existing risk:/type: labels are kept; a disagreement is reported instead
 #  - agent:ready only if the resulting risk is low (or medium when allowed)
 #  - agent:ready and needs:human are mutually exclusive
-#  - at most 5 splits per issue
+#  - at most 5 splits per issue; a split child is a title and a body, nothing else
+#  - agent:paired (owned by the owner's interactive agent) freezes routing: agent:ready
+#    and needs:human are neither added nor removed and the issue is not split; the label
+#    itself is untouchable like agent:urgent. Risk/type labels and the assessment stay allowed.
+#  - nothing here can set a milestone: the output is built field by field, so a
+#    "milestone" (or any other extra field) in an action or a split child is dropped
 def managed: ["risk:low","risk:medium","risk:high",
               "type:bug","type:feature","type:docs","type:test","type:refactor","type:chore",
               "agent:ready","needs:human"];
@@ -27,10 +32,13 @@ reduce (.actions // [])[] as $a ({apply: [], rejected: []};
     # keep human/previous risk and type labels
     | (if ($cur | prefix("risk:") | length) > 0 then $add0 | map(select(startswith("risk:") | not)) else $add0 end) as $add1
     | (if ($cur | prefix("type:") | length) > 0 then $add1 | map(select(startswith("type:") | not)) else $add1 end) as $add2
+    # agent:paired: routing is frozen
+    | (($cur | index("agent:paired")) != null) as $paired
+    | (if $paired then $add2 | map(select(. != "agent:ready" and . != "needs:human")) else $add2 end) as $add2
     # one of each at most
     | ([$add2[] | select(startswith("risk:"))][:1] + [$add2[] | select(startswith("type:"))][:1]
        + [$add2[] | select(startswith("agent:") or startswith("needs:"))] | unique) as $add3
-    | ([($a.remove_labels // [])[] | select(. == "agent:ready" or . == "needs:human")]) as $remove
+    | ([($a.remove_labels // [])[] | select(. == "agent:ready" or . == "needs:human") | select($paired | not)]) as $remove
     | ((($cur + $add3) - $remove) | unique) as $final
     | ([$final[] | select(startswith("risk:"))][0] // "none") as $risk
     | ($risk == "risk:low" or ($allow_medium and $risk == "risk:medium")) as $risk_ok
@@ -49,8 +57,12 @@ reduce (.actions // [])[] as $a ({apply: [], rejected: []};
         remove_labels: $remove_final,
         assessment: ($a.assessment // null),
         question: ($a.question // null),
-        split_into: (($a.split_into // [])[:5]),
-        notes: ([$gate.note, (if ($bad | length) > 0 then "ignored unmanaged labels: \($bad | join(", "))" else empty end)]
+        split_into: (if $paired then [] else [($a.split_into // [])[:5][] | {title, body}] end),
+        notes: ([$gate.note,
+                 (if ($bad | length) > 0 then "ignored unmanaged labels: \($bad | join(", "))" else empty end),
+                 (if $paired and ((($a.add_labels // []) + ($a.remove_labels // []) | map(select(. == "agent:ready" or . == "needs:human")) | length) > 0
+                                  or (($a.split_into // []) | length) > 0)
+                  then "routing left alone: agent:paired (owned by the interactive agent)" else empty end)]
                 | map(select(. != null)))
       }]
   end)

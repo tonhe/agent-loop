@@ -26,8 +26,14 @@ git push -q --force "$remote" "HEAD:refs/heads/$branch"
 
 title=$(jq -r '.pr_title // empty' "$result"); [[ -z $title ]] && title=$(git log -1 --format=%s)
 # Strip any attribution footer or Closes line the model added; the workflow adds its own.
+# The model's text must not carry a marker of its own: "agent-loop issue=N" is what the
+# review gate, the followup job and the selection filter read to tell which issue a PR
+# belongs to, and "<!-- agent-..." comments mark what the loop itself posted. So in the
+# model's part no HTML comment can open and the "=" of "agent-loop issue=" is written as
+# an entity (it renders the same). The marker below is the only one in the body.
 model_body=$(jq -r '.pr_body // ""' "$result" \
   | grep -viE '^[^a-z0-9]*generated with \[?claude|^co-authored-by:|^closes #[0-9]+[[:space:]]*$' \
+  | sed -e 's/<!--/\&lt;!--/g' -e 's/agent-loop\([[:space:]]*\)issue\([[:space:]]*\)=/agent-loop\1issue\2\&#61;/g' \
   | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
 body="$model_body
 
