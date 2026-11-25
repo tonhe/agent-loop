@@ -14,7 +14,9 @@
 #   - needs no owner approval (interim, until https://github.com/tonhe/agent-loop/issues/35:
 #     agents act as the owner, so an owner comment cannot be told from an agent's): the
 #     issue is risk:low, no protected_review_paths file changes (an Owner decision is not
-#     trusted) and the PR is not labeled agent:live-check. Otherwise "needs owner merge".
+#     trusted) and the PR is not labeled agent:live-check, and no risk:* label was added
+#     to or removed from the issue after the PR was opened (the issue timeline).
+#     Otherwise "needs owner merge".
 #   - no merge conflict, and the head is up to date when the ruleset requires it
 #   - the repository is not agent-loop itself
 # Settings come from the caller workflows on the PR's base branch (loop-config.sh), so a
@@ -40,7 +42,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 trap 'echo "merge-gate: REFUSED #$pr: a step failed (line $LINENO); nothing was enabled" >&2' ERR
 
 gh pr view "$pr" -R "$repo" \
-  --json number,state,isDraft,isCrossRepository,author,headRefName,headRefOid,baseRefName,body,mergeable,labels,comments \
+  --json number,state,isDraft,isCrossRepository,author,headRefName,headRefOid,baseRefName,body,mergeable,labels,comments,createdAt \
   > "$work/pr.json"
 base=$(jq -r .baseRefName "$work/pr.json")
 sha=$(jq -r .headRefOid "$work/pr.json")
@@ -54,8 +56,14 @@ owner=$(jq -r .owner_login "$work/config.json")
 n=$(jq -r -L "$here/lib" 'include "pr"; branch_issue // ""' "$work/pr.json")
 if [[ -n "$n" ]]; then
   gh issue view "$n" -R "$repo" --json number,state,author,body,labels,comments > "$work/issue.json"
+  # Every label added to or removed from the issue, with when: a risk:* change after the
+  # PR was opened refuses (the agent acts as the owner and could have set risk:low).
+  gh api --paginate "repos/$repo/issues/$n/timeline?per_page=100" \
+    --jq '[.[] | select(.event == "labeled" or .event == "unlabeled") | {event, created_at, label: .label.name}]' \
+    | jq -s 'add // []' > "$work/labels.json"
 else
   echo null > "$work/issue.json"
+  echo '[]' > "$work/labels.json"
 fi
 
 # Every path the PR touches, both sides of a rename. The API lists at most 3000 files;
@@ -84,11 +92,13 @@ jq -n --arg owner "$owner" --argjson loop "$is_loop" \
       --slurpfile files "$work/files.json" --slurpfile hits "$work/hits.json" \
       --slurpfile cfg "$work/config.json" --slurpfile rules "$work/rules.json" \
       --slurpfile checks "$work/checks.json" --slurpfile statuses "$work/statuses.json" \
+      --slurpfile label_events "$work/labels.json" \
       --argjson behind "$behind" --argjson changed "$changed" --argjson listed "$listed" '
   {owner: $owner, is_loop_repo: $loop, pr: $pr[0], issue: $issue[0], files: $files[0],
    files_complete: ($listed >= $changed), protected_hits: $hits[0],
    protected_review_paths: $cfg[0].protected_review_paths, rules: $rules[0],
    checks: $checks[0], statuses: $statuses[0], behind_by: $behind,
+   label_events: $label_events[0],
    owner_approvals_trusted: false}' > "$work/facts.json"
 jq -L "$here/lib" 'include "merge-gate"; merge_gate' "$work/facts.json" > "$work/decision.json"
 trap - ERR

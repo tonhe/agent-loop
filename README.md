@@ -56,7 +56,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Releases need a human | `environment: release` with you as required reviewer; PAT has no Deployments permission |
 | Digest can't ping anyone | `discord.sh` sets `allowed_mentions.parse = []` |
 | Sprint mode merges only through the merge gate: required checks green on the head, no protected or process path, and for now nothing that needs the owner's approval (`risk:low` only, no `protected_review_paths` file, no `agent:live-check`: otherwise "needs owner merge", tonhe/agent-loop#35), the issue not `needs:human`, no conflicts, up to date if the ruleset says so; never in agent-loop itself | `scripts/merge-gate.sh` decides with `lib/merge-gate.jq`, reading settings from the caller workflows on the PR's base (`loop-config.sh`); the plugin's guard hook blocks `gh pr merge`, the merge API and `enable-automerge.sh` |
-| A sprint agent cannot speak for the owner, undo a stop or loosen a gate | `hooks/guard.sh` (PreToolUse, subagents included): no comment beginning `Owner decision` or `Live check passed/failed`, no removing `needs:human` or `agent:live-check`, no ruleset or branch-protection writes, no edits to the installed plugin |
+| A sprint agent cannot speak for the owner, undo a stop or loosen a gate | `hooks/guard.sh` (PreToolUse, subagents included): no comment beginning `Owner decision` or `Live check passed/failed`, no removing `needs:human`, no adding, removing or setting `risk:*` or `agent:live-check` (`gh issue/pr edit`, `create`, `gh api`, GraphQL), no ruleset or branch-protection writes, no edits to the installed plugin |
 | Local and nightly runs pick the same work and never the same issue at once | `sprint-select.sh` runs `select-issues.sh scheduled` unchanged; `claim-issue.sh` uses `agent:in-progress`, which the nightly selection skips |
 | No two sprint subagents on the same files | `sprint-next.sh`, `lib/sprint.jq` (`pick_parallel`): overlapping scopes wait; an issue that names no file runs alone |
 | A sprint subagent stops instead of touching protected code without a decision | `scope-check.sh`, then `claim-issue.sh stop` (comment, `needs:human`, claim released) |
@@ -367,6 +367,7 @@ Claim; read the issue through `issue-context.sh` (your comments only); stay insi
 - every required status check of the base branch's rulesets succeeded on the head commit (pending, missing, skipped and neutral refuse)
 - no file matches `protected_paths` (git pathspecs, as `check-diff.sh`) or the loop's process paths (`.github/`, `.claude/`, `.claude-plugin/`, `.mcp.json`, any `CLAUDE.md` or `AGENTS.md`, `RELEASING.md`)
 - the PR needs no approval from you: issue N is `risk:low`, no file matches `protected_review_paths`, and the PR isn't labeled `agent:live-check` (below)
+- no `risk:*` label was added to or removed from issue N after the PR was opened (the issue's timeline): the agent acts as you and could have set `risk:low` (https://github.com/tonhe/agent-loop/issues/42)
 - no merge conflict, and the head is up to date when the ruleset requires it
 
 Settings come from the caller workflows on the PR's base branch, read through the contents API at that ref (never from the working tree), so a PR cannot loosen the rules it is checked against. A protection list it cannot read (a missing caller, a `${{ }}` expression) refuses. On success it calls `enable-automerge.sh`; GitHub still merges only when the required checks pass. `--check` decides without turning anything on.
@@ -387,7 +388,7 @@ Live check passed 0123abc
 
 ### What it cannot do, and the limits
 
-- It cannot merge without the gate, change the gate, its settings, rulesets or the plugin, remove `needs:human` or `agent:live-check`, or write a comment that begins `Owner decision` or `Live check passed/failed`. The guard hook blocks these, in subagents too.
+- It cannot merge without the gate, change the gate, its settings, rulesets or the plugin, remove `needs:human`, add, remove or set a `risk:*` or `agent:live-check` label, or write a comment that begins `Owner decision` or `Live check passed/failed`. The guard hook blocks these, in subagents too.
 - It does not replace the nightly loop, and it never works an issue someone else opened.
 - **The agent acts as you on GitHub.** A comment it posts carries your login, so no script can tell your `Owner decision` or live-check answer from one the agent wrote. The guard hook stops the obvious ways; it is a text match, and a determined shell trick can get past it. What GitHub itself enforces is the ruleset: required checks (tests, lab, agent-review) and an empty bypass list. The gate's other rules hold only as long as the agent goes through the gate, which is why, for now, it merges nothing that needs your approval (https://github.com/tonhe/agent-loop/issues/35). Read the final report.
 - Commands you type with `!` in the prompt are not tool calls; the guard does not check them. That is your way to merge by hand.

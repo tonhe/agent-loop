@@ -23,7 +23,11 @@
 #   "checks": [{name, status, conclusion}],  check runs on the head commit, newest first
 #   "statuses": [{context, state}],        commit statuses on the head commit, newest first
 #   "behind_by": 0,                        commits on the base that the head lacks
-#   "owner_approvals_trusted": false       optional, default false: see owner_merge_only
+#   "label_events": [{event, created_at, label}],  labeled/unlabeled events of the issue
+#                                          (its timeline); pr.createdAt is when the PR opened
+#   "owner_approvals_trusted": false       optional, default false: see owner_merge_url.
+#                                          merge-gate.sh writes the literal false; no env
+#                                          var, config or argument reaches it
 # }
 #
 # Output: {"ok": bool, "issue": N|null, "reasons": ["...", ...]}. ok only when reasons
@@ -153,6 +157,18 @@ def merge_gate:
        elif ($iss | labels_of | index("risk:low")) == null then
          "needs owner merge: issue #\($n) is not risk:low (\([$iss | labels_of | .[] | select(startswith("risk:"))] | if length == 0 then "no risk label" else join(", ") end)); only risk:low PRs are merged by the gate until \(owner_merge_url) is done"
        else empty end),
+
+      # --- risk label history ---
+      # The auto-merge rule trusts risk:low, and an agent acting as the owner could set it.
+      # A risk:* label added or removed after the PR was opened leaves the PR for the owner.
+      (if $n == null or ($iss | type) != "object" then empty
+       elif ($in.label_events | type) != "array" then "needs owner merge: the label history of issue #\($n) could not be read"
+       elif ($pr.createdAt // "" | test("\\A[0-9]{4}-")) | not then "needs owner merge: the PR's opening time is unknown, so issue #\($n)'s risk label history cannot be checked"
+       else [$in.label_events[] | select((.label // "") | startswith("risk:")) | select((.created_at // "") >= $pr.createdAt)] as $ch
+         | if ($ch | length) == 0 then empty
+           else "needs owner merge: issue #\($n)'s risk label changed after the PR was opened (\([$ch[] | "\(.event) \(.label) at \(.created_at)"] | join(", ")))"
+           end
+       end),
 
       # --- live check ---
       (if ($pr | labels_of | index("agent:live-check")) == null then empty

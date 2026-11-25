@@ -7,7 +7,8 @@
 #       calling enable-automerge.sh directly
 #   - speak for the owner: post or edit a comment that begins "Owner decision" or
 #     "Live check passed/failed", in the command or in a body file it names
-#   - undo a stop: remove needs:human or agent:live-check, delete a label
+#   - undo a stop: remove needs:human, delete a label
+#   - change what the gate trusts: add, remove or replace risk:* or agent:live-check
 #   - loosen the rules: write to rulesets or branch protection through gh api
 #   - change the installed plugin itself (its gates and scripts): Edit/Write under the
 #     plugin root, or a shell command that names the plugin root and writes
@@ -59,13 +60,21 @@ if grep -qE '(^|[^[:alnum:]_-])gh +' <<<"$flat"; then
     [[ -f "$bf" ]] && grep -qiE "^$lead" "$bf" \
       && block "the body file $bf begins in the owner's voice (\"Owner decision\" / \"Live check ...\")."
   done < <(grep -oE '(--body-file[ =]+|-F +(body=@)?|-f +body=@)[^ ;&|]+' <<<"$flat" | sed -E 's/^(--body-file[ =]+|-F +(body=@)?|-f +body=@)//; s/^["'"'"']//; s/["'"'"']$//')
-  grep -qE -- '--remove-label[ =]+["'"'"']?[^ ]*(needs:human|agent:live-check)' <<<"$flat" \
-    && block "needs:human and agent:live-check are removed by the owner, never by an agent."
+  grep -qE -- '--remove-label[ =]+["'"'"']?[^ ]*needs:human' <<<"$flat" \
+    && block "needs:human is removed by the owner, never by an agent."
+  # risk:* and agent:live-check decide what the merge gate may auto-merge (risk:low only,
+  # never a live-check PR), so an agent neither adds, removes nor sets them: not with
+  # gh issue/pr edit, not on gh issue/pr create. (agent:live-check is set by
+  # sprint-publish.sh itself; the gate reads risk:* history too, see lib/merge-gate.jq.)
+  grep -qE '(^|[^[:alnum:]_-])gh +(issue|pr) +(edit|create)( |$)' <<<"$flat" \
+    && grep -qE -- '(--add-label|--remove-label|--label|(^| )-l)([ =]+|[ =]*["'"'"'])[^;&|]*(risk:|agent:live-check)' <<<"$flat" \
+    && block "risk:* and agent:live-check labels are the owner's (and triage's): an agent never adds, removes or replaces them."
   grep -qE '(^|[^[:alnum:]_-])gh +label +delete' <<<"$flat" && block "labels are not deleted by an agent."
   # Any API write that touches labels, whatever the endpoint: a labels path, a labels
   # field on an issue or PR (PATCH issues/N -f labels[]=...), or a GraphQL label mutation
   # (removeLabelsFromLabelable, clearLabelsFromLabelable, updateIssue with labelIds, ...).
-  # Labels are added with gh issue edit --add-label; nothing else changes them.
+  # Labels are added with gh issue edit --add-label; nothing else changes them. That
+  # includes addLabelsToLabelable with a risk:* label: any API write naming a label.
   if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qiE 'label' <<<"$flat" \
      && grep -qiE '(-X|--method)[ =]*(DELETE|PUT|PATCH|POST)|( -f | -F | --field | --raw-field | --input )|mutation' <<<"$flat"; then
     block "labels are changed only with gh issue edit --add-label, never through the API (needs:human and agent:live-check are the owner's to remove)."

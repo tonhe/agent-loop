@@ -47,6 +47,6 @@ Stop when the finish line is met, the budget is spent (merged PRs or hours), or 
 ## Never
 
 - `gh pr merge`, the merge API or `enable-automerge.sh` (the guard hook blocks them; `merge-gate.sh` is the only path).
-- A comment in the owner's voice ("Owner decision", "Live check passed/failed"), or removing `needs:human` or `agent:live-check`.
+- A comment in the owner's voice ("Owner decision", "Live check passed/failed"), removing `needs:human`, or adding, removing or setting a `risk:*` or `agent:live-check` label.
 - Changing caller workflows, rulesets, labels the process set, or the plugin, to get past a gate.
 - Working an issue someone else opened, or an issue that `sprint-next` did not return.
