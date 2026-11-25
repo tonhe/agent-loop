@@ -19,6 +19,8 @@ on:
       base_branch:      {type: string, default: main}
       max_issues:       {type: number, default: 3}
       selection_order:  {type: string, default: oldest, description: "Scheduled runs: oldest (oldest first) or type (bugs, tech-debt, upkeep, features). Milestones rank above either."}
+      backlog_workflow: {type: string, default: agent-backlog.yml, description: "Scheduled runs wait for an unfinished run of this workflow file (your backlog caller) before selecting. Needs actions: read in the caller."}
+      backlog_wait_minutes: {type: number, default: 15, description: "Longest wait for that backlog run, in minutes (at most 20). 0 = never wait."}
       max_found:        {type: number, default: 3, description: "Max new issues the agent may file per worked issue"}
       model:            {type: string, default: opus}
       max_turns:        {type: number, default: 60}
@@ -34,12 +36,24 @@ on:
 jobs:
   select:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30  # the backlog wait (at most 20 minutes, max_minutes in wait-backlog.sh) plus the selection
     outputs:
       issues: ${{ steps.pick.outputs.issues }}
+      backlog_wait_note: ${{ steps.wait.outputs.note }}
     steps:
       - uses: actions/checkout@v4
         with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", persist-credentials: false}
+      # Scheduled runs only: manual and urgent runs name their issue and start at once.
+      # The script always exits 0; if it cannot list runs it warns and the run goes on.
+      - name: Wait for an unfinished backlog run
+        id: wait
+        if: inputs.mode == 'scheduled' && inputs.backlog_wait_minutes > 0
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKLOG_WORKFLOW: ${{ inputs.backlog_workflow }}
+          WAIT_MINUTES: ${{ inputs.backlog_wait_minutes }}
+        run: bash scripts/wait-backlog.sh
       - id: pick
         env:
           GH_TOKEN: ${{ github.token }}
@@ -254,10 +268,12 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ISSUES: ${{ needs.select.outputs.issues }}
           MODE: ${{ inputs.mode }}
+          WAIT_NOTE: ${{ needs.select.outputs.backlog_wait_note }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
             echo "**Dev agent: ${GITHUB_REPOSITORY#*/}** ($MODE)"
+            if [[ -n "$WAIT_NOTE" ]]; then echo "$WAIT_NOTE"; fi
             if [[ "$ISSUES" == "[]" ]]; then echo "No issues were ready."; fi
             for f in records/*/record.json; do
               [[ -f "$f" ]] || continue

@@ -925,6 +925,113 @@ out=$(S_ISSUE='{"number":21,"state":"OPEN","author":{"login":"tonhe"},"labels":[
 check "select-issues: manual run overrides a native blocker" "[21]" "$out"
 check "select-issues: manual run never asks for dependencies" "0" "$(grep -c 'graphql' "$gs/log")"
 
+# ---------- wait-backlog.sh: a scheduled dev run waits for a running backlog run ----------
+# Own gh stub: call N prints line N of $WB/answers (the last line repeats); a line FAIL
+# makes that call fail. sleep is stubbed too, so no test waits for real.
+wb=$(mktemp -d); mkdir -p "$wb/bin"
+cat > "$wb/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "$*" >> "$WB/log"
+n=$(( $(cat "$WB/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WB/calls"
+total=$(grep -c '' "$WB/answers"); (( n > total )) && n=$total
+line=$(sed -n "${n}p" "$WB/answers")
+if [[ "$line" == FAIL ]]; then echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; fi
+printf '%s\n' "$line"
+GH
+cat > "$wb/bin/sleep" <<'SL'
+#!/usr/bin/env bash
+echo "$1" >> "$WB/sleeps"
+SL
+chmod +x "$wb/bin/gh" "$wb/bin/sleep"
+wbrun() {  # answers (one per line), then extra env assignments
+  printf '%s\n' "$1" > "$wb/answers"; shift
+  rm -f "$wb/calls" "$wb/out" "$wb/err"; : > "$wb/sleeps"; : > "$wb/log"
+  env PATH="$wb/bin:$PATH" WB="$wb" GITHUB_REPOSITORY=o/r GITHUB_OUTPUT="$wb/out" WAIT_MINUTES=2 WAIT_INTERVAL=30 "$@" \
+    bash "$root/scripts/wait-backlog.sh" 2>"$wb/err"
+}
+wbout() { grep "^$1=" "$wb/out" 2>/dev/null | cut -d= -f2-; }
+done_run='{"status":"completed","databaseId":1}'
+busy='[{"status":"in_progress","databaseId":2},'"$done_run"']'
+queued='[{"status":"queued","databaseId":2}]'
+idle="[$done_run]"
+
+out=$(wbrun "$idle"); rc=$?
+check "wait-backlog: no backlog run -> no wait, exit 0" "0|0|0" "$rc|$(grep -c '' "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: no backlog run -> says so, nothing for the digest" "1|" "$(grep -c 'No backlog run in progress' <<<"$out")|$(wbout note)"
+check "wait-backlog: asks for the caller's workflow in this repository" "1" \
+  "$(grep -c -- '^run list -R o/r --workflow agent-backlog.yml .*--json status' "$wb/log")"
+out=$(wbrun '[]'); rc=$?
+check "wait-backlog: workflow that never ran -> no wait" "0|0" "$rc|$(wbout waited)"
+out=$(wbrun "$idle" BACKLOG_WORKFLOW=triage.yml)
+check "wait-backlog: workflow file name comes from BACKLOG_WORKFLOW" "1" "$(grep -c -- '--workflow triage.yml ' "$wb/log")"
+
+out=$(wbrun "$busy"$'\n'"$busy"$'\n'"$idle"); rc=$?
+check "wait-backlog: run in progress that finishes -> waits, then continues" "0|30,30|60" \
+  "$rc|$(paste -sd, "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: ... and tells the log and the digest how long" "1|Waited 60 s for a backlog run to finish before selecting issues." \
+  "$(grep -c 'Waited 60 s' <<<"$out")|$(wbout note)"
+out=$(wbrun "$queued"$'\n'"$idle"); rc=$?
+check "wait-backlog: a queued run counts as running" "0|30" "$rc|$(wbout waited)"
+out=$(wbrun '[{"status":"pending","databaseId":3}]'$'\n'"$idle")
+check "wait-backlog: so does one held back by its concurrency group (pending)" "30" "$(wbout waited)"
+
+out=$(wbrun "$busy"); rc=$?
+check "wait-backlog: cap reached -> stops waiting, exit 0" "0|4|120" "$rc|$(grep -c '' "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: cap reached -> says so in the log, as a warning and in the digest" \
+  "1|1|A backlog run was still going after 120 s; issues were selected anyway." \
+  "$(grep -c 'still going after 120 s' <<<"$out")|$(grep -c '^::warning::' "$wb/err")|$(wbout note)"
+out=$(wbrun "$busy" WAIT_MINUTES=1 WAIT_INTERVAL=45)
+check "wait-backlog: never sleeps past the cap" "45,15|60" "$(paste -sd, "$wb/sleeps")|$(wbout waited)"
+
+out=$(wbrun FAIL); rc=$?
+check "wait-backlog: gh failing (e.g. no actions: read) -> no wait, exit 0" "0|0|0" "$rc|$(grep -c '' "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: ... with a warning that names the permission" "1" "$(grep -c '^::warning::.*actions: read' "$wb/err")"
+out=$(wbrun 'not json'); rc=$?
+check "wait-backlog: unusable answer -> warning, no wait, exit 0" "0|0|1" "$rc|$(grep -c '' "$wb/sleeps")|$(grep -c '^::warning::' "$wb/err")"
+out=$(wbrun "$busy"$'\n'FAIL); rc=$?
+check "wait-backlog: gh failing during the wait -> stops waiting, exit 0" "0|30|1" "$rc|$(wbout waited)|$(grep -c '^::warning::' "$wb/err")"
+check "wait-backlog: ... and the digest says the wait was cut short" \
+  "Waited 30 s for a backlog run, then could not read its state; issues were selected anyway." "$(wbout note)"
+
+out=$(wbrun "$busy" WAIT_MINUTES=0); rc=$?
+check "wait-backlog: cap 0 switches the wait off without asking GitHub" "0|0|0" "$rc|$(grep -c '' "$wb/log" 2>/dev/null)|$(wbout waited)"
+out=$(wbrun "$busy" WAIT_MINUTES=abc); rc=$?
+check "wait-backlog: unusable cap -> the default 15 minutes, with a warning" "0|900|1" "$rc|$(wbout waited)|$(grep -c '^::warning::.*WAIT_MINUTES' "$wb/err")"
+out=$(wbrun ''); rc=$?
+check "wait-backlog: empty answer -> warning, no wait, exit 0" "0|0|1" "$rc|$(wbout waited)|$(grep -c '^::warning::' "$wb/err")"
+out=$(wbrun "$busy" WAIT_MINUTES=600); rc=$?
+check "wait-backlog: cap above the limit is cut to 20 minutes" "0|1200" "$rc|$(wbout waited)"
+out=$(wbrun "$busy" WAIT_INTERVAL=0); rc=$?
+check "wait-backlog: unusable interval -> the default 30 seconds, not a busy loop" "0|30,30,30,30" "$rc|$(paste -sd, "$wb/sleeps")"
+out=$(wbrun "$idle" BACKLOG_WORKFLOW=); rc=$?
+check "wait-backlog: empty workflow name -> agent-backlog.yml" "1" "$(grep -c -- '--workflow agent-backlog.yml ' "$wb/log")"
+printf '%s\n' "$idle" > "$wb/answers"; rm -f "$wb/calls"
+out=$(env -u GITHUB_OUTPUT PATH="$wb/bin:$PATH" WB="$wb" GITHUB_REPOSITORY=o/r bash "$root/scripts/wait-backlog.sh" 2>/dev/null); rc=$?
+check "wait-backlog: runs without GITHUB_OUTPUT" "0|1" "$rc|$(grep -c 'No backlog run in progress' <<<"$out")"
+rm -rf "$wb"
+
+devyml="$root/.github/workflows/dev.yml"
+wait_step=$(awk '/^      - /{blk=""} {blk=blk $0 "\n"} /scripts\/wait-backlog\.sh/{printf "%s", blk}' "$devyml")
+check "dev.yml: the wait runs for mode scheduled only (manual and urgent never wait)" "1" \
+  "$(grep -cE "^[[:space:]]*if: inputs\.mode == 'scheduled' && " <<<"$wait_step")"
+check "dev.yml: the wait step cannot fail the select job" "1" "$(grep -c 'continue-on-error: true' <<<"$wait_step")"
+check "dev.yml: the wait comes before the selection" "1" \
+  "$(awk '/scripts\/wait-backlog\.sh/{w=NR} /scripts\/select-issues\.sh/{s=NR} END{print (w && s && w < s) ? 1 : 0}' "$devyml")"
+check "dev.yml: the wait script is started with no expression in the command" "1|0" \
+  "$(grep -c 'scripts/wait-backlog\.sh' "$devyml")|$(grep 'scripts/wait-backlog\.sh' "$devyml" | grep -c '\${{')"
+check "dev.yml: backlog wait inputs only as inputs, in the step's if: and on env lines" "0" \
+  "$(grep -E 'backlog_workflow|backlog_wait_minutes' "$devyml" | grep -vcE '^[[:space:]]*(backlog_workflow:[[:space:]]+\{type: string, default: agent-backlog\.yml|backlog_wait_minutes:[[:space:]]+\{type: number, default: 15|if: inputs\.mode == .scheduled. && inputs\.backlog_wait_minutes > 0$|BACKLOG_WORKFLOW: \$\{\{ inputs\.backlog_workflow \}\}$|WAIT_MINUTES: \$\{\{ inputs\.backlog_wait_minutes \}\}$)')"
+check "dev.yml: both wait inputs reach the script" "1|1" \
+  "$(grep -c 'BACKLOG_WORKFLOW: \${{ inputs\.backlog_workflow }}' <<<"$wait_step")|$(grep -c 'WAIT_MINUTES: \${{ inputs\.backlog_wait_minutes }}' <<<"$wait_step")"
+check "dev.yml: the wait's outputs only on outputs: and env lines" "0" \
+  "$(grep 'steps\.wait\.outputs\|needs\.select\.outputs\.backlog_wait' "$devyml" | grep -vcE '^[[:space:]]*(backlog_wait_note|WAIT_NOTE): \$\{\{ ')"
+check "dev.yml: the digest is given the wait note" "1" "$(grep -c 'WAIT_NOTE: \${{ needs\.select\.outputs\.backlog_wait_note }}' "$devyml")"
+sel_timeout=$(awk '/^  select:/{f=1} f && /timeout-minutes:/{print $2; exit}' "$devyml")
+max_wait=$(sed -n 's/^max_minutes=\([0-9]*\).*/\1/p' "$root/scripts/wait-backlog.sh")
+check "dev.yml: the select job's timeout covers the longest wait plus the selection" "1" \
+  "$(( ${max_wait:-999} + 5 <= ${sel_timeout:-0} ? 1 : 0 ))"
+check "caller example: agent-dev.yml grants actions: read" "1" "$(grep -cE '^  actions: read' "$root/examples/caller/agent-dev.yml")"
+
 all='[{"number":20,"title":"t","body":"Blocked by #4.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
  {"number":21,"title":"t","body":"ok","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
  {"number":22,"title":"t","body":"ok","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
