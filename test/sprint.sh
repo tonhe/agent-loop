@@ -109,6 +109,9 @@ check "gate: history replays in time order" "true" \
 check "gate: agent:live-check removed from the PR refuses: needs owner merge" \
   "needs owner merge: the PR was labeled agent:live-check and the label is gone: the owner runs the live check and merges" \
   "$(mgr '.pr_label_events = [{event: "labeled", created_at: "2026-11-20T10:01:00Z", label: "agent:live-check"}, {event: "unlabeled", created_at: "2026-11-20T12:00:00Z", label: "agent:live-check"}]')"
+check "gate: needs:human removed from the issue at any time refuses: needs owner merge" \
+  "needs owner merge: needs:human was removed from issue #36 at some point; the gate cannot tell whether the owner or an agent removed it" \
+  "$(mgr '.label_events += [{event: "labeled", created_at: "2026-11-19T09:30:00Z", label: "needs:human"}, {event: "unlabeled", created_at: "2026-11-19T09:40:00Z", label: "Needs:Human"}]')"
 check "gate: unread PR label history refuses" "needs owner merge: the PR's label history could not be read" "$(mgr 'del(.pr_label_events)')"
 check "gate: no protected_review_paths configured -> nothing to decide" "true" "$(mgc '.files += ["internal/sysprobe/a.go"] | .protected_review_paths = ""')"
 
@@ -616,9 +619,23 @@ for c in "gh issue edit 36 --add-label risk:low" "gh issue edit 36 --remove-labe
          "gh api -X PATCH repos/o/r/issues/36 --input b.json" "gh api --method=patch repos/o/r/pulls/50 -f state=closed"; do
   check "guard: blocks: $c" "2" "$(guard Bash "$c")"
 done
-for c in "gh issue list -R o/r -l risk:low" "gh label list" "gh api graphql -f query='query{repository(owner:\"o\",name:\"r\"){id}}'" \
-         "gh api repos/o/r/issues/36/comments -f body=hi" "gh api repos/o/r/issues/36/timeline --paginate"; do
+for c in "gh issue list -R o/r -l risk:low" "gh label list" "gh api repos/o/r/issues/36/timeline --paginate" \
+         "gh api -X GET repos/o/r/issues/36" "gh api -XGET repos/o/r/pulls/50 --jq .labels" "gh api --method=get repos/o/r/pulls/50" \
+         "gh api repos/\$R/issues/36/timeline" "gh api \"repos/\${R}/pulls/50/files?per_page=100\" --paginate" \
+         "gh issue -R o/r list --label risk:low" "gh issue list --repo=o/r -l risk:low" "gh pr view 50 --json labels"; do
   check "guard: allows: $c" "0" "$(guard Bash "$c")"
+done
+# gh api is read-only for an agent; label reads must be one plain gh issue/pr read
+for c in "gh api repos/o/r/issues/36/comments -f body=hi" "gh api graphql -f query='query{viewer{login}}'" \
+         "gh api repos/o/r/issues/36 -fstate=closed" "gh api -iFstate=closed repos/o/r/issues/36" "gh api repos/o/r/issues/36 --raw-field=state=closed" \
+         "gh api -XPATCH repositories/1/issues/36" "gh api repositories/1/issues/36 -X PATCH" "gh api --method patch repos/o/r/pulls/50" \
+         "gh api graphql -f query=\"\$(cat q.graphql)\"" "gh api graphql -f query=\"\$Q\"" "gh api \$X repos/o/r/issues/36" "gh api \`echo -XPOST\` repos/o/r/issues/36" \
+         "gh api -X DELETE repos/o/r/rulesets/7" "gh api repos/o/r/branches/main/protection -X PUT --input p.json" \
+         "gh alias set il 'issue edit'" "gh alias import a.yml" "gh extension install someone/gh-labels" \
+         "gh il 36 --add-label risk:low" "gh issue list --label risk:low; gh issue edit 36 --add-label risk:low" \
+         "echo 36 | gh issue edit --add-label risk:low" "gh issue list -l risk:low && gh issue edit 36 --add-label agent:ready" \
+         $'gh issue list -l risk:low\ngh issue edit 36 --add-label risk:low'; do
+  check "guard: blocks: $c" "2" "$(guard Bash "$c")"
 done
 for c in "gh issue list --label risk:low" "gh issue edit 36 --add-label agent:in-progress" "gh issue view 36 --json labels --jq '.labels[].name | select(startswith(\"risk:\"))'" \
          "gh api repos/o/r/issues/36/timeline" "gh issue edit 36 --remove-label agent:ready"; do

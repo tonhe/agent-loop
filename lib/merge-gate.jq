@@ -170,6 +170,11 @@ def merge_gate:
          | if ($ch | length) == 0 then empty
            else "needs owner merge: issue #\($n)'s risk label changed after the PR was opened (\([$ch[] | "\(.event) \(.label) at \(.created_at)"] | join(", ")))"
            end,
+         # needs:human ever removed from the issue: the agent could have done it (it acts as
+         # the owner), so the issue's stop is not known to be answered by the owner.
+         (if any($in.label_events[]; .event == "unlabeled" and ((.label // "") | ascii_downcase) == "needs:human")
+          then "needs owner merge: needs:human was removed from issue #\($n) at some point; the gate cannot tell whether the owner or an agent removed it"
+          else empty end),
          # The history replayed must give the risk labels the issue has now. Events keep
          # the label's name at the time, so a label renamed since (risk:medium -> risk:low)
          # shows up here as a mismatch.
