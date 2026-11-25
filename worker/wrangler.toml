@@ -1,0 +1,26 @@
+name = "agent-loop-trigger"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+# The Worker has no HTTP interface; it only runs on its cron.
+workers_dev = false
+preview_urls = false
+
+# One trigger: a tick at :07, :17, :27, :37, :47 and :57 of every hour (UTC).
+# What runs at which tick is the table in src/config.js. Cloudflare's free plan
+# allows five cron triggers per account; this uses one.
+[triggers]
+crons = ["7-59/10 * * * *"]
+
+# When this version was deployed. A "did it start" check is skipped for a start
+# scheduled before that, so the first tick after a deploy cannot raise an alert
+# about a start this Worker never made.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
+[observability]
+enabled = true
+
+# Secrets, set with `wrangler secret put`, never written here:
+#   GITHUB_TOKEN         fine-grained token, one repo, "Actions: read and write"
+#   DISCORD_WEBHOOK_URL  where failures are reported
