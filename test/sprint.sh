@@ -1,5 +1,8 @@
 # Sprint mode: merge gate, loop config, claims, reports, local selection, overlap.
 # Sourced by test/run.sh (uses its check(), $root, $pass and $fail).
+# shellcheck shell=bash
+# $root comes from test/run.sh; jq programs in single quotes are intentional:
+# shellcheck disable=SC2154,SC2016
 
 # ---------- merge-gate.jq: the decision ----------
 sha=0123456789abcdef0123456789abcdef01234567
@@ -525,6 +528,7 @@ mkissue 12 release "Release v0.3.0 <!-- agent-release -->" v0.3.0 tonhe 12
 out=$(sprun bash "$root/scripts/sprint-progress.sh" "merged https://github.com/o/r/pull/50 <!-- agent-loop issue=1 -->" 2>&1)
 check "progress: no webhook -> the line is printed; a new progress comment on the Release issue" "1|1|0" \
   "$(grep -c '^\*\*Sprint: r\*\* merged https://github.com/o/r/pull/50' <<<"$out")|$(grep -c '^gh issue comment 12 -R o/r --body <!-- agent-sprint-progress -->' "$sp/log")|$(grep -c '<!-- agent-loop issue=1' "$sp/log")"
+# shellcheck disable=SC2028  # the \n is meant literally, inside the JSON strings
 echo '[{"id": 77, "user": {"login": "tonhe"}, "body": "<!-- agent-sprint-progress -->\n**Sprint progress**\n\n- one"}, {"id": 78, "user": {"login": "mallory"}, "body": "<!-- agent-sprint-progress --> fake"}]' > "$sp/comments.json"
 : > "$sp/log"
 sprun bash "$root/scripts/sprint-progress.sh" "merged two" >/dev/null 2>&1
