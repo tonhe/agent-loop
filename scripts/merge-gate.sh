@@ -65,6 +65,10 @@ else
   echo null > "$work/issue.json"
   echo '[]' > "$work/labels.json"
 fi
+# The PR's own label history: agent:live-check removed from the PR still counts.
+gh api --paginate "repos/$repo/issues/$pr/timeline?per_page=100" \
+  --jq '[.[] | select(.event == "labeled" or .event == "unlabeled") | {event, created_at, label: .label.name}]' \
+  | jq -s 'add // []' > "$work/pr-labels.json"
 
 # Every path the PR touches, both sides of a rename. The API lists at most 3000 files;
 # a list shorter than changed_files refuses (files_complete below).
@@ -92,13 +96,13 @@ jq -n --arg owner "$owner" --argjson loop "$is_loop" \
       --slurpfile files "$work/files.json" --slurpfile hits "$work/hits.json" \
       --slurpfile cfg "$work/config.json" --slurpfile rules "$work/rules.json" \
       --slurpfile checks "$work/checks.json" --slurpfile statuses "$work/statuses.json" \
-      --slurpfile label_events "$work/labels.json" \
+      --slurpfile label_events "$work/labels.json" --slurpfile pr_label_events "$work/pr-labels.json" \
       --argjson behind "$behind" --argjson changed "$changed" --argjson listed "$listed" '
   {owner: $owner, is_loop_repo: $loop, pr: $pr[0], issue: $issue[0], files: $files[0],
    files_complete: ($listed >= $changed), protected_hits: $hits[0],
    protected_review_paths: $cfg[0].protected_review_paths, rules: $rules[0],
    checks: $checks[0], statuses: $statuses[0], behind_by: $behind,
-   label_events: $label_events[0],
+   label_events: $label_events[0], pr_label_events: $pr_label_events[0],
    owner_approvals_trusted: false}' > "$work/facts.json"
 jq -L "$here/lib" 'include "merge-gate"; merge_gate' "$work/facts.json" > "$work/decision.json"
 trap - ERR

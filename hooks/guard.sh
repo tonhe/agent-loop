@@ -60,24 +60,44 @@ if grep -qE '(^|[^[:alnum:]_-])gh +' <<<"$flat"; then
     [[ -f "$bf" ]] && grep -qiE "^$lead" "$bf" \
       && block "the body file $bf begins in the owner's voice (\"Owner decision\" / \"Live check ...\")."
   done < <(grep -oE '(--body-file[ =]+|-F +(body=@)?|-f +body=@)[^ ;&|]+' <<<"$flat" | sed -E 's/^(--body-file[ =]+|-F +(body=@)?|-f +body=@)//; s/^["'"'"']//; s/["'"'"']$//')
-  grep -qE -- '--remove-label[ =]+["'"'"']?[^ ]*needs:human' <<<"$flat" \
+  # Label rules match a normalized copy: quotes and backslashes removed, lower case
+  # (GitHub label names are case-insensitive: RISK:LOW is risk:low).
+  norm=$(tr -d "\"'\\" <<<"$flat" | tr '[:upper:]' '[:lower:]')
+  grep -qE -- '--remove-label( |=)?[^;&|]*needs:human' <<<"$norm" \
     && block "needs:human is removed by the owner, never by an agent."
   # risk:* and agent:live-check decide what the merge gate may auto-merge (risk:low only,
-  # never a live-check PR), so an agent neither adds, removes nor sets them: not with
-  # gh issue/pr edit, not on gh issue/pr create. (agent:live-check is set by
-  # sprint-publish.sh itself; the gate reads risk:* history too, see lib/merge-gate.jq.)
-  grep -qE '(^|[^[:alnum:]_-])gh +(issue|pr) +(edit|create)( |$)' <<<"$flat" \
-    && grep -qE -- '(--add-label|--remove-label|--label|(^| )-l)([ =]+|[ =]*["'"'"'])[^;&|]*(risk:|agent:live-check)' <<<"$flat" \
-    && block "risk:* and agent:live-check labels are the owner's (and triage's): an agent never adds, removes or replaces them."
-  grep -qE '(^|[^[:alnum:]_-])gh +label +delete' <<<"$flat" && block "labels are not deleted by an agent."
+  # never a live-check PR), so an agent neither adds, removes nor sets them. A label flag
+  # naming one is allowed only in a read (gh issue/pr list|view|status) with no edit or
+  # create anywhere in the command. (sprint-publish.sh sets agent:live-check itself;
+  # the gate also checks the label history, see lib/merge-gate.jq.)
+  if grep -qE -- '(--add-label|--remove-label|--label|(^| )-l)( |=)?[^;&|]*(risk:|agent:live-check)' <<<"$norm"; then
+    if ! grep -qE '(^|[^[:alnum:]_-])gh .*(^| )(list|view|status)( |$)' <<<"$norm" \
+       || grep -qE '(^| )(edit|create|api)( |$)' <<<"$norm"; then
+      block "risk:* and agent:live-check labels are the owner's (and triage's): an agent never adds, removes or replaces them."
+    fi
+  fi
+  # Labels themselves (create, rename, recolor, delete, clone) are the owner's: renaming
+  # risk:medium to risk:low would change every issue at once.
+  grep -qE '(^|[^[:alnum:]_-])gh( +-[^ ]+( +[^ -][^ ]*)?)* +label +(create|edit|delete|clone)( |$)' <<<"$norm" \
+    && block "labels are created, renamed and deleted by the owner (bootstrap-labels.sh), never by an agent."
   # Any API write that touches labels, whatever the endpoint: a labels path, a labels
   # field on an issue or PR (PATCH issues/N -f labels[]=...), or a GraphQL label mutation
   # (removeLabelsFromLabelable, clearLabelsFromLabelable, updateIssue with labelIds, ...).
-  # Labels are added with gh issue edit --add-label; nothing else changes them. That
-  # includes addLabelsToLabelable with a risk:* label: any API write naming a label.
-  if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qiE 'label' <<<"$flat" \
-     && grep -qiE '(-X|--method)[ =]*(DELETE|PUT|PATCH|POST)|( -f | -F | --field | --raw-field | --input )|mutation' <<<"$flat"; then
-    block "labels are changed only with gh issue edit --add-label, never through the API (needs:human and agent:live-check are the owner's to remove)."
+  # Labels are added with gh issue edit --add-label; nothing else changes them.
+  apiw='(-x|--method)( |=)*(delete|put|patch|post)|( -f| -F| --field| --raw-field| --input)( |=)'
+  if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$norm"; then
+    if grep -q 'label' <<<"$norm" && grep -qiE "$apiw|mutation" <<<"$flat"; then
+      block "labels are changed only with gh issue edit --add-label, never through the API (needs:human, risk:* and agent:live-check are the owner's)."
+    fi
+    # What the command text cannot show: a GraphQL query from a file or stdin, any
+    # GraphQL mutation, and a write to an issue or PR itself (its labels, state, body).
+    # Agents use gh issue/pr commands for those.
+    if grep -qE '(^| )graphql( |$)' <<<"$norm" && grep -qE 'mutation|=@|--input' <<<"$norm"; then
+      block "no GraphQL mutations (or queries from a file) through gh api. Use gh issue/pr commands."
+    fi
+    if grep -qE 'repos/[^ /]+/[^ /]+/(issues|pulls)/[0-9]+([ ?]|$)' <<<"$norm" && grep -qiE "$apiw" <<<"$flat"; then
+      block "no API writes to an issue or PR itself (labels, state, body). Use gh issue/pr commands."
+    fi
   fi
   if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qE 'rulesets|/protection([^[:alnum:]]|$)' <<<"$flat" \
      && grep -qiE '(-X|--method)[ =]*(PUT|PATCH|POST|DELETE)|( -f | -F | --field | --raw-field | --input )' <<<"$flat"; then

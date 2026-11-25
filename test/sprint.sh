@@ -20,7 +20,8 @@ mg_ok=$(jq -nc --arg sha "$sha" '{
            {id: 0, name: "CodeRabbit", status: "completed", conclusion: "neutral"}],
   statuses: [], behind_by: 0,
   label_events: [{event: "labeled", created_at: "2026-11-19T09:00:00Z", label: "risk:low"},
-                 {event: "labeled", created_at: "2026-11-20T11:00:00Z", label: "agent:in-progress"}]}')
+                 {event: "labeled", created_at: "2026-11-20T11:00:00Z", label: "agent:in-progress"}],
+  pr_label_events: []}')
 mg() {  # jq edit applied to the passing facts -> "ok|reason; reason"
   jq -c "$1" <<<"$mg_ok" | jq -r -L "$root/lib" 'include "merge-gate"; merge_gate | "\(.ok)|\(.reasons | join("; "))"'
 }
@@ -78,7 +79,7 @@ check "gate: agent:live-check WITH the owner's passed answer refuses: needs owne
   "$(mgc ".pr.labels = [{name: \"agent:live-check\"}] | .pr.comments = [{author: {login: \"tonhe\"}, body: \"Live check passed $sha\"}]")|$(mgr ".pr.labels = [{name: \"agent:live-check\"}] | .pr.comments = [{author: {login: \"tonhe\"}, body: \"Live check passed $sha\"}]" | grep -c '^needs owner merge: labeled agent:live-check')"
 check "gate: a risk:medium issue refuses: needs owner merge" \
   "needs owner merge: issue #36 is not risk:low (risk:medium); only risk:low PRs are merged by the gate until https://github.com/tonhe/agent-loop/issues/35 is done" \
-  "$(mgr '.issue.labels = [{name: "risk:medium"}]')"
+  "$(mgr '.issue.labels = [{name: "risk:medium"}] | .label_events[0].label = "risk:medium"')"
 check "gate: an issue with no risk label refuses: needs owner merge" "1" "$(mgr '.issue.labels = []' | grep -c '^needs owner merge: issue #36 is not risk:low (no risk label)')"
 check "gate: a protected_paths hit says needs owner merge" "1" "$(mgr '.protected_hits = ["Makefile"]' | grep -c '^needs owner merge: changes protected path "Makefile"')"
 check "gate: risk:low, no protected file, no live check still passes" "true|" "$(mg .)"
@@ -97,6 +98,18 @@ check "gate: other labels changing after the PR was opened do not matter" "true"
   "$(mgc '.label_events += [{event: "unlabeled", created_at: "2026-11-22T00:00:00Z", label: "agent:in-progress"}]')"
 check "gate: unread label history refuses" "needs owner merge: the label history of issue #36 could not be read" "$(mgr 'del(.label_events)')"
 check "gate: unknown PR opening time refuses" "false" "$(mgc 'del(.pr.createdAt)')"
+check "gate: a renamed label (history says risk:medium, issue shows risk:low) refuses: needs owner merge" \
+  "needs owner merge: issue #36's risk labels (risk:low) do not match its label history (risk:medium): a label was renamed, or the history is incomplete" \
+  "$(mgr '.label_events[0].label = "risk:medium"')"
+check "gate: risk:low added then removed before the PR, yet shown now, refuses" "false" \
+  "$(mgc '.label_events += [{event: "unlabeled", created_at: "2026-11-19T10:00:00Z", label: "risk:low"}]')"
+check "gate: label names compare case-insensitively (RISK:LOW is risk:low)" "true" "$(mgc '.label_events[0].label = "RISK:LOW"')"
+check "gate: history replays in time order" "true" \
+  "$(mgc '.label_events = [{event: "labeled", created_at: "2026-11-19T09:00:00Z", label: "risk:low"}, {event: "unlabeled", created_at: "2026-11-18T09:00:00Z", label: "risk:medium"}, {event: "labeled", created_at: "2026-11-17T09:00:00Z", label: "risk:medium"}]')"
+check "gate: agent:live-check removed from the PR refuses: needs owner merge" \
+  "needs owner merge: the PR was labeled agent:live-check and the label is gone: the owner runs the live check and merges" \
+  "$(mgr '.pr_label_events = [{event: "labeled", created_at: "2026-11-20T10:01:00Z", label: "agent:live-check"}, {event: "unlabeled", created_at: "2026-11-20T12:00:00Z", label: "agent:live-check"}]')"
+check "gate: unread PR label history refuses" "needs owner merge: the PR's label history could not be read" "$(mgr 'del(.pr_label_events)')"
 check "gate: no protected_review_paths configured -> nothing to decide" "true" "$(mgc '.files += ["internal/sysprobe/a.go"] | .protected_review_paths = ""')"
 
 check "gate: issue labeled needs:human refuses" "issue #36 is labeled needs:human" "$(mgr '.issue.labels += [{name: "needs:human"}]')"
@@ -166,6 +179,7 @@ case "$args" in
   *"pulls/50/files"*"--jq length"*) jq 'length' "$MG/files.json" ;;
   *"pulls/50/files"*"--jq .[].filename"*) jq -r '.[].filename' "$MG/files.json" ;;  # as real gh prints it
   *"rules/branches/"*) cat "$MG/rules.json" ;;
+  *"issues/50/timeline"*) jq -c '[.[] | select(.event == "labeled" or .event == "unlabeled") | {event, created_at, label: .label.name}]' "$MG/pr-timeline.json" ;;
   *"/timeline"*)     jq -c '[.[] | select(.event == "labeled" or .event == "unlabeled") | {event, created_at, label: .label.name}]' "$MG/timeline.json" ;;
   *"/check-runs"*)   jq -c '[.check_runs[] | {id, name, status, conclusion}]' "$MG/checks.json" ;;
   *"/statuses"*)     echo '[]' ;;
@@ -182,6 +196,7 @@ jq '.issue' <<<"$mg_ok" > "$mgs/issue.json"
 jq '[.files[] | {filename: .}]' <<<"$mg_ok" > "$mgs/files.json"
 echo 2 > "$mgs/changed"
 jq '.rules' <<<"$mg_ok" > "$mgs/rules.json"
+echo '[]' > "$mgs/pr-timeline.json"
 jq '[.label_events[] | {event, created_at, label: {name: .label}, actor: {login: "tonhe"}}] + [{event: "commented", created_at: "2026-11-21T00:00:00Z"}]' <<<"$mg_ok" > "$mgs/timeline.json"
 jq '{check_runs: .checks}' <<<"$mg_ok" > "$mgs/checks.json"
 cat > "$mgs/dev.yml" <<'Y'
@@ -283,6 +298,13 @@ out=$(mgrun 50); rc=$?
 check "gate.sh: risk:low added after the PR opened (issue timeline) refuses as needs owner merge, never merges" "1|1|1|0" \
   "$rc|$(grep -c "issue #36's risk label changed after the PR was opened (labeled risk:low at 2026-11-20T12:00:00Z)" <<<"$out")|$(grep -c 'api --paginate repos/o/r/issues/36/timeline' "$mgs/log")|$(grep -c 'pr merge' "$mgs/log")"
 cp "$mgs/timeline.bak" "$mgs/timeline.json"
+
+# agent:live-check taken off the PR (its timeline) still refuses.
+echo '[{"event":"labeled","created_at":"2026-11-20T10:01:00Z","label":{"name":"agent:live-check"}},{"event":"unlabeled","created_at":"2026-11-20T12:00:00Z","label":{"name":"agent:live-check"}}]' > "$mgs/pr-timeline.json"
+out=$(mgrun 50); rc=$?
+check "gate.sh: agent:live-check removed from the PR (PR timeline) refuses as needs owner merge, never merges" "1|1|1|0" \
+  "$rc|$(grep -c 'the PR was labeled agent:live-check and the label is gone' <<<"$out")|$(grep -c 'api --paginate repos/o/r/issues/50/timeline' "$mgs/log")|$(grep -c 'pr merge' "$mgs/log")"
+echo '[]' > "$mgs/pr-timeline.json"
 
 # owner_approvals_trusted is a constant in merge-gate.sh: no env var, config or argument sets it.
 jq --arg sha "$sha" '.labels = [{name: "agent:live-check"}] | .comments = [{author: {login: "tonhe"}, body: ("Live check passed " + $sha)}]' "$mgs/pr.bak" > "$mgs/pr.json"
@@ -585,8 +607,18 @@ for c in "gh issue edit 36 --add-label risk:low" "gh issue edit 36 --remove-labe
          "gh api -X POST repos/o/r/issues/36/labels -f 'labels[]=risk:low'" "gh api repos/o/r/issues/36/labels -f labels[]=risk:low" \
          "gh api -X PATCH repos/o/r/issues/36 -f 'labels[]=risk:low' -f 'labels[]=agent:ready'" \
          "gh api graphql -f query='mutation{addLabelsToLabelable(input:{labelableId:\"I\",labelIds:[\"RISK_LOW\"]}){clientMutationId}}'" \
-         "gh api graphql -f query='mutation{removeLabelsFromLabelable(input:{labelableId:\"P\",labelIds:[\"LIVE\"]}){clientMutationId}}'"; do
+         "gh api graphql -f query='mutation{removeLabelsFromLabelable(input:{labelableId:\"P\",labelIds:[\"LIVE\"]}){clientMutationId}}'" \
+         "gh issue edit 36 --add-label RISK:LOW" "gh issue -R o/r edit 36 --add-label risk:low" "gh -R o/r issue edit 36 --add-label risk:low" \
+         "gh issue create -t t -b b -lrisk:low" "gh issue edit 36 --add-label r\\isk:low" "gh issue edit 36 --add-label 'ri''sk:low'" \
+         "gh pr edit 50 --remove-label Agent:Live-Check" "gh issue edit 36 --remove-label NEEDS:HUMAN" \
+         "gh label edit risk:medium --name risk:low" "gh label create risk:low" "gh -R o/r label edit x --name y" "gh label clone o/x" \
+         "gh api graphql -F query=@q.graphql" "gh api graphql --input q.json" "gh api graphql -f query='mutation{closeIssue(input:{issueId:\"I\"}){clientMutationId}}'" \
+         "gh api -X PATCH repos/o/r/issues/36 --input b.json" "gh api --method=patch repos/o/r/pulls/50 -f state=closed"; do
   check "guard: blocks: $c" "2" "$(guard Bash "$c")"
+done
+for c in "gh issue list -R o/r -l risk:low" "gh label list" "gh api graphql -f query='query{repository(owner:\"o\",name:\"r\"){id}}'" \
+         "gh api repos/o/r/issues/36/comments -f body=hi" "gh api repos/o/r/issues/36/timeline --paginate"; do
+  check "guard: allows: $c" "0" "$(guard Bash "$c")"
 done
 for c in "gh issue list --label risk:low" "gh issue edit 36 --add-label agent:in-progress" "gh issue view 36 --json labels --jq '.labels[].name | select(startswith(\"risk:\"))'" \
          "gh api repos/o/r/issues/36/timeline" "gh issue edit 36 --remove-label agent:ready"; do

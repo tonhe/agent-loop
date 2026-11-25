@@ -24,7 +24,9 @@
 #   "statuses": [{context, state}],        commit statuses on the head commit, newest first
 #   "behind_by": 0,                        commits on the base that the head lacks
 #   "label_events": [{event, created_at, label}],  labeled/unlabeled events of the issue
-#                                          (its timeline); pr.createdAt is when the PR opened
+#                                          (its timeline, oldest first); pr.createdAt is
+#                                          when the PR opened
+#   "pr_label_events": [{event, created_at, label}],  the same for the PR
 #   "owner_approvals_trusted": false       optional, default false: see owner_merge_url.
 #                                          merge-gate.sh writes the literal false; no env
 #                                          var, config or argument reaches it
@@ -167,10 +169,24 @@ def merge_gate:
        else [$in.label_events[] | select((.label // "") | startswith("risk:")) | select((.created_at // "") >= $pr.createdAt)] as $ch
          | if ($ch | length) == 0 then empty
            else "needs owner merge: issue #\($n)'s risk label changed after the PR was opened (\([$ch[] | "\(.event) \(.label) at \(.created_at)"] | join(", ")))"
+           end,
+         # The history replayed must give the risk labels the issue has now. Events keep
+         # the label's name at the time, so a label renamed since (risk:medium -> risk:low)
+         # shows up here as a mismatch.
+         (reduce ($in.label_events | sort_by(.created_at // "") | .[] | select((.label // "") | ascii_downcase | startswith("risk:"))) as $e
+            ([]; ($e.label | ascii_downcase) as $l | if $e.event == "labeled" then (. + [$l] | unique) else map(select(. != $l)) end)) as $replayed
+         | ([$iss | labels_of | .[] | ascii_downcase | select(startswith("risk:"))] | unique) as $now
+         | if $replayed == $now then empty
+           else "needs owner merge: issue #\($n)'s risk labels (\($now | join(", ") | if . == "" then "none" else . end)) do not match its label history (\($replayed | join(", ") | if . == "" then "none" else . end)): a label was renamed, or the history is incomplete"
            end
        end),
 
       # --- live check ---
+      (if ($in.pr_label_events | type) != "array" then "needs owner merge: the PR's label history could not be read"
+       elif ($pr | labels_of | index("agent:live-check")) != null then empty
+       elif any($in.pr_label_events[]; (.label // "" | ascii_downcase) == "agent:live-check") then
+         "needs owner merge: the PR was labeled agent:live-check and the label is gone: the owner runs the live check and merges"
+       else empty end),
       (if ($pr | labels_of | index("agent:live-check")) == null then empty
        elif ($trusted | not) then
          "needs owner merge: labeled agent:live-check; the owner runs the live check and merges by hand, since a live-check answer cannot be verified while agents act as the owner (\(owner_merge_url))"
