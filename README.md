@@ -70,6 +70,8 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 ## Per-repo setup
 
 1. Copy `examples/caller/*.yml` to the repo's `.github/workflows/` and change the lines marked `CHANGE`.
+   - `agent-dev.yml` needs `actions: read` under `permissions:` (the example has it). The nightly dev run uses it to see whether a backlog run is still going and waits for it. If you copied the callers before this was added, add the line; without it the run warns and starts without waiting.
+   - If your backlog caller is not named `agent-backlog.yml`, set `backlog_workflow: <file name>` in the `with:` block of `agent-dev.yml`. `backlog_wait_minutes` (default 15, at most 20) is the longest wait; `0` switches it off. See "Order of work".
 2. Secrets (`gh secret set NAME -R owner/repo`, paste when prompted):
    - `CLAUDE_CODE_OAUTH_TOKEN`
    - `AGENT_PAT`
@@ -166,6 +168,8 @@ Pick `type` when the backlog holds old feature or stretch issues: with `oldest` 
 ```
 
 `agent:paired` issues and the loop's own Release and Plan issues are never in the list.
+
+Before it selects, a run in mode `scheduled` checks for a run of the backlog workflow (`backlog_workflow`, default `agent-backlog.yml`) that has not finished, whether in progress, queued or held back, and waits for it, so it does not pick from labels that triage is about to change (`scripts/wait-backlog.sh`). It checks every 30 seconds for at most `backlog_wait_minutes` (default 15, at most 20; `0` = never wait), then selects either way. The digest says when a run waited and when it gave up waiting. Manual and urgent runs name their issue and never wait. If the runs cannot be listed (no `actions: read` in the caller, wrong file name, GitHub error), the run log carries a warning and selection starts at once.
 
 ## Release issues
 
@@ -334,5 +338,6 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 - A changed file whose name is not valid UTF-8 cannot be put into a split review: a loop PR with one fails the check, an owner PR lists it as not reviewed. A PR under the split thresholds is not affected.
 - The review job fails if the agent-loop checkout or the gate itself fails, before the mode is known. Past the gate, an owner PR cannot be failed by the review.
 - Cron times are UTC; Eastern times shift by an hour at DST.
+- The nightly dev run waits for a backlog run that exists when it starts, for at most 20 minutes. A backlog run started after the selection, or one still going when the wait gives up, can still change labels under it. Only the newest 20 runs of the backlog workflow are looked at.
 - `make golden-update` (or similar) lets the agent regenerate golden files. The review prompt checks for weakened tests, but read golden diffs yourself.
 - The fix round trusts CodeRabbit's comments as feedback. They are still treated as code feedback, never as instructions about credentials or CI.
