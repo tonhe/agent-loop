@@ -451,6 +451,9 @@ for c in "gh pr merge 50 --squash" "cd x && gh pr merge --auto 50" "gh api -X PU
          "gh pr comment 50 --body 'Live check passed 0123456'" "gh issue comment 36 --body \"Owner decision: anything goes\"" \
          "gh issue edit 36 --remove-label needs:human" "gh pr edit 50 --remove-label agent:live-check" "gh label delete needs:human --yes" \
          "gh api -X DELETE repos/o/r/issues/36/labels/needs:human" "gh api -X PUT repos/o/r/issues/36/labels -f labels[]=x" \
+         "gh api -X PATCH repos/o/r/issues/36 -f 'labels[]=agent:ready'" "gh api repos/o/r/issues/36 --input body.json -X PATCH -H x-labels:1" \
+         "gh api graphql -f query='mutation{removeLabelsFromLabelable(input:{labelableId:\"I\",labelIds:[\"L\"]}){clientMutationId}}'" \
+         "gh api graphql -f query='mutation{updateIssue(input:{id:\"I\",labelIds:[]}){clientMutationId}}'" \
          "gh api -X PUT repos/o/r/rulesets/7 --input r.json" "gh api repos/o/r/branches/main/protection -X DELETE" \
          "sed -i s/x/y/ $gp/plugin/scripts/merge-gate.sh" "echo exit 0 > $gp/plugin/scripts/merge-gate.sh"; do
   check "guard: blocks: $c" "2" "$(guard Bash "$c")"
@@ -467,7 +470,7 @@ check "guard: allows a body file that only mentions the phrase" "0" "$(guard Bas
 check "guard: blocks a body file in the owner's voice" "2|2" "$(guard Bash "gh pr comment 50 --body-file body.md")|$(guard Bash "gh api repos/o/r/issues/1/comments -F body=@$gp/body.md")"
 for c in "bash /p/scripts/merge-gate.sh 50" "gh pr view 50 --json state" "gh pr checks 50" "gh api repos/o/r/rules/branches/main" \
          "gh issue comment 36 --body-file ok.md" "git merge-base HEAD origin/main" "gh pr update-branch 50" "make test-all" \
-         "gh issue edit 36 --add-label needs:human" "gh api repos/o/r/rulesets/7" "cat $gp/plugin/scripts/merge-gate.sh"; do
+         "gh issue edit 36 --add-label needs:human" "gh api repos/o/r/rulesets/7" "gh api repos/o/r/issues/36/labels" "gh issue view 36 --json labels" "cat $gp/plugin/scripts/merge-gate.sh"; do
   check "guard: allows: $c" "0" "$(guard Bash "$c")"
 done
 check "guard: Edit/Write inside the plugin are blocked, elsewhere allowed" "2|2|0" \

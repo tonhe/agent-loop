@@ -62,9 +62,13 @@ if grep -qE '(^|[^[:alnum:]_-])gh +' <<<"$flat"; then
   grep -qE -- '--remove-label[ =]+["'"'"']?[^ ]*(needs:human|agent:live-check)' <<<"$flat" \
     && block "needs:human and agent:live-check are removed by the owner, never by an agent."
   grep -qE '(^|[^[:alnum:]_-])gh +label +delete' <<<"$flat" && block "labels are not deleted by an agent."
-  if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qE '/labels' <<<"$flat" \
-     && grep -qiE '(-X|--method)[ =]*(DELETE|PUT|PATCH)' <<<"$flat"; then
-    block "labels are changed through gh issue edit, never by deleting or replacing them through the API."
+  # Any API write that touches labels, whatever the endpoint: a labels path, a labels
+  # field on an issue or PR (PATCH issues/N -f labels[]=...), or a GraphQL label mutation
+  # (removeLabelsFromLabelable, clearLabelsFromLabelable, updateIssue with labelIds, ...).
+  # Labels are added with gh issue edit --add-label; nothing else changes them.
+  if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qiE 'label' <<<"$flat" \
+     && grep -qiE '(-X|--method)[ =]*(DELETE|PUT|PATCH|POST)|( -f | -F | --field | --raw-field | --input )|mutation' <<<"$flat"; then
+    block "labels are changed only with gh issue edit --add-label, never through the API (needs:human and agent:live-check are the owner's to remove)."
   fi
   if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qE 'rulesets|/protection([^[:alnum:]]|$)' <<<"$flat" \
      && grep -qiE '(-X|--method)[ =]*(PUT|PATCH|POST|DELETE)|( -f | -F | --field | --raw-field | --input )' <<<"$flat"; then
