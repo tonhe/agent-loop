@@ -369,6 +369,172 @@ check "split: empty diff -> one empty group" '{"split":false,"n":1,"files":0}' \
 check "split: nonsense thresholds are treated as 1, never as unlimited" '{"n":2,"capped":false}' \
   "$(sp "$(ns 1 a/f; ns 1 b/f)" 0 -5 8 '{n: (.groups | length), capped}')"
 
+# ---------- one review comment from the per-group results (lib/review.jq, review-post.sh, advisory.sh) ----------
+# cmb MODE 'group specs as a jq array of [name, rc, result|null, truncated]' [extra jq object] -> review_combine output
+cmb() { jq -n -c -L "$root/lib" --arg mode "$1" --argjson g "$2" --argjson x "${3:-{\}}" 'include "review";
+          ({mode: $mode, head: "abc1234", linked: [], protected: "",
+            plan: {split: (($g | length) > 1), capped: false, uncapped: ($g | length), total_files: 120, total_lines: 5000,
+                   groups: ($g | map({name: .[0], files: 40, lines: 1000}))},
+            calls: ($g | map({rc: .[1], result: .[2], truncated: (.[3] // false)}))} + $x) | review_combine'; }
+r_pass='{"verdict":"pass","summary":"Looks right.","findings":[{"severity":"minor","file":"a.go","line":3,"comment":"nit"}]}'
+r_block='{"verdict":"block","summary":"Breaks the probe.","findings":[{"severity":"blocking","file":"internal/probe/x.go","line":41,"comment":"nil map"},{"severity":"minor","comment":"no file here"}]}'
+out=$(cmb loop "[[\"all\",\"0\",$r_pass]]")
+check "combine: loop, one group, pass -> the comment the loop has always posted" \
+  '<!-- agent-review -->|### Agent review: PASS||Looks right.||- **minor** `a.go:3` nit' "$(jq -r .body <<<"$out" | paste -sd'|' -)"
+check "combine: loop pass is complete" '["pass",true]' "$(jq -c '[.verdict, .complete]' <<<"$out")"
+out=$(cmb loop "[[\"all\",\"0\",$r_block]]")
+check "combine: loop block -> BLOCK, findings with and without a file" '### Agent review: BLOCK|1|1' \
+  "$(jq -r .body <<<"$out" | sed -n 2p)|$(jq -r .body <<<"$out" | grep -c '^- \*\*blocking\*\* `internal/probe/x.go:41` nil map$')|$(jq -r .body <<<"$out" | grep -c '^- \*\*minor\*\* no file here$')"
+out=$(cmb owner "[[\"all\",\"0\",$r_block]]" '{"linked":[12,14]}')
+check "combine: owner -> its own marker and an advisory heading" '<!-- agent-review-owner -->|### Agent review (advisory): BLOCK' "$(jq -r .body <<<"$out" | sed -n '1p;2p' | paste -sd'|' -)"
+check "combine: owner comment says it is advisory, which commit, and which issues it used" "1|1|1" \
+  "$(jq -r .body <<<"$out" | grep -c 'This review is advisory')|$(jq -r .body <<<"$out" | grep -c 'commit `abc1234`')|$(jq -r .body <<<"$out" | grep -c '^Reviewed against linked issue(s) #12, #14\.$')"
+check "combine: owner verdict is still reported as it is" '["block",true]' "$(jq -c '[.verdict, .complete]' <<<"$out")"
+check "combine: an owner comment cannot be taken for a loop review, a fix-round marker or an issue marker" "false|false|false" \
+  "$(jq -r '.body | contains("<!-- agent-review -->")' <<<"$out")|$(jq -r '.body | contains("agent-fix-round")' <<<"$out")|$(jq -r '.body | test("agent-loop issue=")' <<<"$out")"
+out=$(cmb owner "[[\"all\",\"0\",$r_pass]]")
+check "combine: owner with no usable linked issue says the diff was reviewed alone" "1" "$(jq -r .body <<<"$out" | grep -c '^No usable linked issue: reviewed on the diff alone\.$')"
+out=$(cmb owner "[[\"all\",\"0\",$r_pass]]" '{"protected":"#### Protected paths\n\n- `cmd/via/main.go` (protected by `cmd/via/*.go`)"}')
+check "combine: the script's protected-path section is in the owner comment, ahead of the model's text" "1|true" \
+  "$(jq -r .body <<<"$out" | grep -c '^- `cmd/via/main.go` (protected by `cmd/via/\*.go`)$')|$(jq -r '.body | (index("#### Protected paths") < index("Looks right."))' <<<"$out")"
+out=$(cmb loop "[[\"all\",\"0\",$r_pass]]" '{"protected":"#### Protected paths\n\n- x"}')
+check "combine: loop comments never carry the owner section" "0" "$(jq -r .body <<<"$out" | grep -c 'Protected paths')"
+r_p2='{"verdict":"pass","summary":"Docs are fine.","findings":[]}'
+out=$(cmb loop "[[\"cmd/\",\"0\",$r_pass],[\"internal/\",\"0\",$r_block],[\"docs/\",\"0\",$r_p2]]")
+check "combine: split, worst verdict wins" '["block",true]' "$(jq -c '[.verdict, .complete]' <<<"$out")"
+check "combine: split, says how the PR was divided" "1" "$(jq -r .body <<<"$out" | grep -c '^Large PR: 120 files, 5000 changed lines, reviewed in 3 parts\.$')"
+check "combine: split, one heading and summary per part" "1|1|1|3" \
+  "$(jq -r .body <<<"$out" | grep -c '^#### Part 1 of 3: `cmd/`: PASS$')|$(jq -r .body <<<"$out" | grep -c '^#### Part 2 of 3: `internal/`: BLOCK$')|$(jq -r .body <<<"$out" | grep -c '^Docs are fine\.$')|$(jq -r .body <<<"$out" | grep -c '^#### Part ')"
+check "combine: split, all findings merged, each with its file and line" "3|1|1" \
+  "$(jq -r .body <<<"$out" | sed -n '/^#### Findings$/,$p' | grep -c '^- \*\*')|$(jq -r .body <<<"$out" | grep -c '^- \*\*minor\*\* `a.go:3` nit$')|$(jq -r .body <<<"$out" | grep -c '^- \*\*blocking\*\* `internal/probe/x.go:41` nil map$')"
+out=$(cmb loop "[[\"cmd/\",\"0\",$r_pass],[\"docs/\",\"0\",$r_p2]]")
+check "combine: split, pass only when every part passes" '["pass",true]' "$(jq -c '[.verdict, .complete]' <<<"$out")"
+out=$(cmb owner "[[\"cmd/\",\"0\",$r_pass],[\"internal/\",\"124\",{\"status\":\"too_big\",\"summary\":\"Hit the wall-clock timeout.\"}],[\"docs/\",\"0\",$r_p2]]")
+check "combine: one part failed -> the rest still counts, the review is incomplete" '["pass",false,["internal/"]]' "$(jq -c '[.verdict, .complete, .failed]' <<<"$out")"
+check "combine: ... and the comment names the part and says why" "### Agent review (advisory): PASS (INCOMPLETE)|1|1" \
+  "$(jq -r .body <<<"$out" | sed -n 2p)|$(jq -r .body <<<"$out" | grep -c '^#### Part 2 of 3: `internal/`: NOT REVIEWED$')|$(jq -r .body <<<"$out" | grep -c 'ran into the time limit')"
+out=$(cmb owner '[["all","4",null]]')
+check "combine: the only call failed -> NOT COMPLETED, no verdict" '["none",false]|### Agent review (advisory): NOT COMPLETED|1' \
+  "$(jq -c '[.verdict, .complete]' <<<"$out")|$(jq -r .body <<<"$out" | sed -n 2p)|$(jq -r .body <<<"$out" | grep -c 'The review could not be completed')"
+for bad in '{"status":"too_big","summary":"x"}' 'null' '"text"' '{"verdict":"maybe","summary":"s","findings":[]}' '{"verdict":"pass","summary":"s","findings":"none"}' '{"verdict":"pass","findings":[]}' '{"verdict":"pass","summary":"s","findings":[{"severity":"fatal","comment":"c"}]}' '{"verdict":"pass","summary":"s","findings":[{"severity":"minor","comment":"c","line":"3"}]}'; do
+  check "combine: a result that is not a review ($bad) counts as failed, never as pass" '["none",false]' "$(cmb loop "[[\"all\",\"0\",$bad]]" | jq -c '[.verdict, .complete]')"
+done
+check "combine: an exit code other than 0 fails the part even next to a good-looking result" '["none",false]' "$(cmb loop "[[\"all\",\"3\",$r_pass]]" | jq -c '[.verdict, .complete]')"
+check "combine: no plan at all -> NOT COMPLETED" '["none",false,"### Agent review (advisory): NOT COMPLETED"]' \
+  "$(jq -n -c -L "$root/lib" 'include "review"; {mode: "owner", plan: null, calls: [], head: "", linked: null, protected: ""} | review_combine | [.verdict, .complete, (.body | split("\n")[1])]')"
+out=$(cmb loop '[["all","0",{"verdict":"pass","summary":"ok <!-- agent-fix-round --> and <!-- agent-review-owner -->","findings":[{"severity":"minor","file":"a`b.go","comment":"x <!-- agent-loop issue=5 -->"}]}]]')
+check "combine: model text cannot open an HTML comment, so it cannot plant a loop marker" "1|3" \
+  "$(jq -r .body <<<"$out" | grep -c '<!--')|$(jq -r .body <<<"$out" | grep -o '&lt;!--' | wc -l | tr -d ' ')"
+check "combine: a backtick in a model-given file name stays inside its code span" "1" "$(jq -r .body <<<"$out" | grep -c "^- \*\*minor\*\* \`a'b.go\` x ")"
+out=$(cmb owner "[[\"all\",\"0\",$r_pass,true]]")
+check "combine: a cut diff is said in the review" "1" "$(jq -r .body <<<"$out" | grep -c 'diff.* was cut at the size limit')"
+out=$(cmb loop "[[\"a/\",\"0\",$r_pass],[\"b/\",\"0\",$r_p2]]" '{"plan":{"split":true,"capped":true,"uncapped":11,"total_files":900,"total_lines":20000,"groups":[{"name":"a/","files":500,"lines":9000},{"name":"b/","files":400,"lines":11000}]}}')
+check "combine: groups merged to stay under the call cap are said in the review" "1" "$(jq -r .body <<<"$out" | grep -c '11 parts.*merged')"
+out=$(cmb owner "[[\"all\",\"0\",$(jq -nc '{verdict: "pass", summary: ("long " * 15000), findings: []}')]]" '{"protected":"#### Protected paths\n\n- `KEEP/me.go` (protected by `KEEP`)"}')
+check "combine: an oversized review is cut to fit one comment; the script's sections survive" "true|1|1" \
+  "$(jq -r '(.body | length) <= 60000' <<<"$out")|$(jq -r .body <<<"$out" | grep -c 'KEEP/me.go')|$(jq -r .body <<<"$out" | grep -c 'cut to fit one comment')"
+check "combine: a group name from the PR cannot break its code span or the heading" "1" \
+  "$(cmb loop "[[\"we\`ird\\nname/\",\"0\",$r_pass],[\"b/\",\"0\",$r_p2]]" | jq -r .body | grep -c "^#### Part 1 of 2: \`we'ird name/\`: PASS\$")"
+
+erc() { jq -c -L "$root/lib" 'include "review"; existing_review_comment("<!-- agent-review-owner -->")' <<<"$1"; }
+check "upsert: no comment yet -> create" 'null' "$(erc '[]')"
+check "upsert: the bot's owner-review comment is the one to update" '31' \
+  "$(erc '[{"id":30,"login":"tonhe","body":"hello"},{"id":31,"login":"github-actions[bot]","body":"<!-- agent-review-owner -->\n### Agent review (advisory): PASS"}]')"
+check "upsert: the marker in someone else's comment is never picked" 'null' \
+  "$(erc '[{"id":30,"login":"tonhe","body":"<!-- agent-review-owner -->\nmine"},{"id":32,"login":"mallory","body":"<!-- agent-review-owner -->"},{"id":33,"login":"github-actions","body":"<!-- agent-review-owner -->"}]')"
+check "upsert: a loop review or a fix-round comment by the bot is never overwritten" 'null' \
+  "$(erc '[{"id":40,"login":"github-actions[bot]","body":"<!-- agent-review -->\n### Agent review: BLOCK"},{"id":41,"login":"github-actions[bot]","body":"<!-- agent-fix-round -->Agent fix round started"}]')"
+check "upsert: the marker must begin the comment (a quoted one does not count)" 'null' \
+  "$(erc '[{"id":42,"login":"github-actions[bot]","body":"> <!-- agent-review-owner -->\nquoted"},{"id":43,"login":"github-actions[bot]","body":"x <!-- agent-review-owner -->"}]')"
+check "upsert: several -> the oldest, so one comment keeps being updated" '50' \
+  "$(erc '[{"id":50,"login":"github-actions[bot]","body":"<!-- agent-review-owner -->\na"},{"id":51,"login":"github-actions[bot]","body":"<!-- agent-review-owner -->\nb"}]')"
+check "upsert: an id that is not a number is not used" 'null' "$(erc '[{"id":"50; rm -rf /","login":"github-actions[bot]","body":"<!-- agent-review-owner -->"}]')"
+
+pw=$(mktemp -d); mkdir -p "$pw/bin"
+cat > "$pw/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GHLOG"
+[[ -n "${GH_DOWN:-}" ]] && { echo "gh: HTTP 502" >&2; exit 1; }
+case "$1 $2" in
+  "pr comment") while [[ $# -gt 0 ]]; do [[ "$1" == --body-file ]] && cp "$2" "$GHLOG.body"; shift; done ;;
+  "api -X")     while [[ $# -gt 0 ]]; do [[ "$1" == --input ]] && cp "$2" "$GHLOG.patch"; shift; done ;;
+  "api "*)      printf '%s' "${V_COMMENTS:-}" ;;
+esac
+GH
+chmod +x "$pw/bin/gh"
+plan1='{"split":false,"capped":false,"uncapped":1,"total_files":2,"total_lines":10,"groups":[{"name":"all","paths":["a.go","b.go"],"files":2,"lines":10}]}'
+mkwork() {  # plan json ("" = none), then one "rc|result json" per group
+  rm -rf "$pw/w"; mkdir -p "$pw/w"; [[ -n "$1" ]] && printf '%s' "$1" > "$pw/w/plan.json"; shift
+  local i=0 a; for a in "$@"; do mkdir -p "$pw/w/groups/$i"; printf '%s' "${a%%|*}" > "$pw/w/groups/$i/rc"
+    [[ -n "${a#*|}" ]] && printf '%s' "${a#*|}" > "$pw/w/groups/$i/result.json"; i=$((i+1)); done
+}
+post() {  # mode, [wrapper script] -> exit code; output in $pw/stdout, summary in $pw/summary
+  : > "$pw/log"; : > "$pw/summary"; rm -f "$pw/log.body" "$pw/log.patch"
+  ( PATH="$pw/bin:$PATH" GHLOG="$pw/log" GITHUB_REPOSITORY=o/r MODE="$1" HEAD_SHA=abc1234def GITHUB_STEP_SUMMARY="$pw/summary" \
+      bash ${2:+"$2"} ${2:+bash} "$root/scripts/review-post.sh" "$pw/w" 9 > "$pw/stdout" 2>&1 )
+}
+mkwork "$plan1" "0|$r_block"; post owner; rc=$?
+check "review-post: owner mode exits 0 on a block verdict" "0" "$rc"
+check "review-post: owner, no earlier comment -> one new comment with the advisory heading" "1|0|### Agent review (advisory): BLOCK" \
+  "$(grep -c '^pr comment 9 -R o/r --body-file ' "$pw/log")|$(grep -c '^api -X' "$pw/log")|$(sed -n 2p "$pw/log.body")"
+check "review-post: owner comments are looked up through the API for this PR" "1" "$(grep -c '^api repos/o/r/issues/9/comments --paginate ' "$pw/log")"
+check "review-post: the review is also in the step summary" "1" "$(grep -c '^### Agent review (advisory): BLOCK$' "$pw/summary")"
+check "review-post: an advisory block is not an error annotation" "0" "$(grep -c '::error::' "$pw/stdout")"
+mkwork "$plan1" "0|$r_pass"
+V_COMMENTS=$'{"id":7,"login":"tonhe","body":"<!-- agent-review-owner -->"}\n{"id":555,"login":"github-actions[bot]","body":"<!-- agent-review-owner -->\\n### Agent review (advisory): BLOCK"}\n' post owner; rc=$?
+check "review-post: owner, the bot's earlier comment is updated in place, no new comment" "0|1|0" \
+  "$rc|$(grep -c '^api -X PATCH repos/o/r/issues/comments/555 --input ' "$pw/log")|$(grep -c '^pr comment' "$pw/log")"
+check "review-post: the update carries the new review as its body" "### Agent review (advisory): PASS" "$(jq -r .body "$pw/log.patch" | sed -n 2p)"
+mkwork "$plan1" "4|"; post owner; rc=$?
+check "review-post: owner mode exits 0 on a missing result.json" "0" "$rc"
+check "review-post: ... posts that the review could not be completed, with a warning" "1|1|0" \
+  "$(grep -c 'The review could not be completed' "$pw/log.body")|$(grep -c '^::warning::' "$pw/stdout")|$(grep -c '::error::' "$pw/stdout")"
+mkwork "$plan1" "0|not json at all"; post owner; rc=$?
+check "review-post: owner mode exits 0 on a malformed result" "0|### Agent review (advisory): NOT COMPLETED" "$rc|$(sed -n 2p "$pw/log.body")"
+mkwork ""; post owner; rc=$?
+check "review-post: owner mode with no plan at all (earlier steps failed) still posts and exits 0" "0|### Agent review (advisory): NOT COMPLETED|1" \
+  "$rc|$(sed -n 2p "$pw/log.body")|$(grep -c '^::warning::' "$pw/stdout")"
+mkwork "$plan1" "0|$r_pass"; post loop; rc=$?
+check "review-post: loop pass -> exit 0, a new comment each time, no comment lookup" "0|1|0|<!-- agent-review -->|### Agent review: PASS" \
+  "$rc|$(grep -c '^pr comment 9 -R o/r --body-file ' "$pw/log")|$(grep -c '^api' "$pw/log")|$(sed -n 1p "$pw/log.body")|$(sed -n 2p "$pw/log.body")"
+mkwork "$plan1" "0|$r_block"; post loop; rc=$?
+check "review-post: loop mode exits non-zero on a block verdict, after posting" "1|1|1" "$rc|$(grep -c '^pr comment' "$pw/log")|$(grep -c '^::error::Agent review blocked this PR' "$pw/stdout")"
+mkwork "$plan1" "4|"; post loop; rc=$?
+check "review-post: loop mode exits non-zero on a missing result.json" "1" "$rc"
+mkwork "$plan1" "0|{\"status\":\"too_big\"}"; post loop; rc=$?
+check "review-post: loop mode exits non-zero on a malformed result" "1" "$rc"
+mkwork ""; post loop; rc=$?
+check "review-post: loop mode exits non-zero with no plan" "1" "$rc"
+plan3='{"split":true,"capped":false,"uncapped":3,"total_files":90,"total_lines":4000,"groups":[{"name":"a/","paths":[],"files":30,"lines":1000},{"name":"b/","paths":[],"files":30,"lines":1000},{"name":"c/","paths":[],"files":30,"lines":2000}]}'
+mkwork "$plan3" "0|$r_pass" "124|{\"status\":\"too_big\",\"summary\":\"Hit the wall-clock timeout.\"}" "0|$r_p2"; post owner; rc=$?
+check "review-post: owner, one of three parts failed -> exit 0, the part is named, the others are there" "0|1|1|1" \
+  "$rc|$(grep -c '^#### Part 2 of 3: `b/`: NOT REVIEWED$' "$pw/log.body")|$(grep -c '^Docs are fine\.$' "$pw/log.body")|$(grep -c '^::warning::' "$pw/stdout")"
+post loop; rc=$?
+check "review-post: loop, one of three parts failed -> exit non-zero" "1" "$rc"
+mkwork "$plan3" "0|$r_pass" "0|$r_block" "0|$r_p2"; post loop; rc=$?
+check "review-post: loop, three parts, one blocks -> one combined comment, exit non-zero" "1|1|3" "$rc|$(grep -c '^pr comment' "$pw/log")|$(grep -c '^#### Part ' "$pw/log.body")"
+mkwork "$plan1" "0|$r_pass"; touch "$pw/w/groups/0/truncated"; mkdir -p "$pw/w/protected" "$pw/w/linked"
+printf '#### Protected paths\n\n- `cmd/via/main.go` (protected by `cmd/via/*.go`)\n' > "$pw/w/protected/owner-section.md"; echo '[12]' > "$pw/w/linked/used.json"
+post owner; rc=$?
+check "review-post: owner comment carries the protected section, the linked issues, the commit and the cut-diff note" "0|1|1|1|1" \
+  "$rc|$(grep -c '^- `cmd/via/main.go` (protected by `cmd/via/\*.go`)$' "$pw/log.body")|$(grep -c 'linked issue(s) #12\.' "$pw/log.body")|$(grep -c 'commit `abc1234`' "$pw/log.body")|$(grep -c 'was cut at the size limit' "$pw/log.body")"
+mkwork "$plan1" "0|$r_pass"
+GH_DOWN=1 post owner; rc=$?
+check "review-post: owner, GitHub down -> the script itself fails ..." "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+GH_DOWN=1 post owner "$root/scripts/advisory.sh"; rc=$?
+check "advisory: ... and under advisory.sh an owner-mode failure is a warning and exit 0" "0|1|0" "$rc|$(grep -c '^::warning::' "$pw/stdout")|$(grep -c '::error::' "$pw/stdout")"
+check "advisory: the step summary says the review could not be completed" "1" "$(grep -c 'could not be completed' "$pw/summary")"
+GH_DOWN=1 post loop "$root/scripts/advisory.sh"; rc=$?
+check "advisory: loop mode keeps the failure" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+adv() { ( MODE="$1" GITHUB_STEP_SUMMARY=/dev/null bash "$root/scripts/advisory.sh" bash -c "$2" >/dev/null 2>&1 ); echo $?; }
+check "advisory: exit codes: owner 0, loop unchanged, unknown or empty mode unchanged, success is success" "0|124|7|7|0|0" \
+  "$(adv owner 'exit 124')|$(adv loop 'exit 124')|$(adv '' 'exit 7')|$(adv OWNER 'exit 7')|$(adv loop 'exit 0')|$(adv owner 'exit 0')"
+check "advisory: arguments are passed on as they are, never re-evaluated" 'a b|$(touch x)|3' \
+  "$(cd "$pw" && MODE=owner bash "$root/scripts/advisory.sh" bash -c 'printf "%s|%s|%s" "$1" "$2" "$#"' _ 'a b' '$(touch x)' 'c')"
+check "advisory: no command -> an error in every mode but owner" "0|1" \
+  "$( ( MODE=owner bash "$root/scripts/advisory.sh" >/dev/null 2>&1 ); echo $?)|$( ( MODE=loop bash "$root/scripts/advisory.sh" >/dev/null 2>&1 ); [[ $? -ne 0 ]] && echo 1 || echo 0)"
+rm -rf "$pw"
+
 # ---------- apply-backlog.sh (stubbed gh, dry run) ----------
 ab=$(mktemp -d); mkdir -p "$ab/bin" "$ab/w/claude"
 printf '#!/usr/bin/env bash\necho "$*" >> "$GHLOG"\n' > "$ab/bin/gh"; chmod +x "$ab/bin/gh"
