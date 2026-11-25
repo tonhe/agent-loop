@@ -40,6 +40,7 @@ jq --argjson allowed "$allowed" \
    -f "$here/lib/validate-plan.jq" "$w/claude/result.json" > "$w/validated.json"
 
 new_issues=0
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 digest=()
 failed_issues=0
 # step_failed STEP TEXT: a gh call for issue $n failed. TEXT goes on the issue's digest
@@ -120,6 +121,10 @@ while read -r a; do
 
   if [[ -n $body ]]; then
     if [[ $(jq -r '.assessment // empty' <<<"$a") == "" ]]; then body=$'<!-- agent-assessment -->\n'"$body"; fi
+    # The comment is edited in place, so its creation time stays at the first run. The
+    # time of this write goes on the second line, where candidates.jq (assessed_at) reads
+    # it: an owner comment older than this must not make the issue a candidate again.
+    body=$'<!-- agent-assessment -->\n<!-- assessed-at '"$now"$' -->\n'"${body#$'<!-- agent-assessment -->\n'}"
     # Without the answer there is no telling whether to update or to post, and posting
     # blind could leave two assessment comments, so a failed lookup posts nothing.
     if ! existing=$(gh api "repos/$repo/issues/$n/comments" --paginate \
