@@ -62,6 +62,10 @@ if grep -qE '(^|[^[:alnum:]_-])gh +' <<<"$flat"; then
   grep -qE -- '--remove-label[ =]+["'"'"']?[^ ]*(needs:human|agent:live-check)' <<<"$flat" \
     && block "needs:human and agent:live-check are removed by the owner, never by an agent."
   grep -qE '(^|[^[:alnum:]_-])gh +label +delete' <<<"$flat" && block "labels are not deleted by an agent."
+  if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qE '/labels' <<<"$flat" \
+     && grep -qiE '(-X|--method)[ =]*(DELETE|PUT|PATCH)' <<<"$flat"; then
+    block "labels are changed through gh issue edit, never by deleting or replacing them through the API."
+  fi
   if grep -qE '(^|[^[:alnum:]_-])gh +api( |$)' <<<"$flat" && grep -qE 'rulesets|/protection([^[:alnum:]]|$)' <<<"$flat" \
      && grep -qiE '(-X|--method)[ =]*(PUT|PATCH|POST|DELETE)|( -f | -F | --field | --raw-field | --input )' <<<"$flat"; then
     block "rulesets and branch protection are the owner's. An agent never changes a gate to get past it."

@@ -33,17 +33,20 @@ yaml2json() {
   fi
 }
 
-# The with: block of the first job that has one.
+# The with: block of the job that calls agent-loop's reusable workflow ($2: dev or
+# review), so another job's settings in the same file are never read instead.
 caller_with() {
-  local file=$1 raw
+  local file=$1 wf=$2 raw
   raw=$(gh api "repos/$repo/contents/.github/workflows/$file?ref=$ref" --jq .content) || {
     echo "loop-config: cannot read .github/workflows/$file on $ref of $repo" >&2; return 1; }
-  base64 -d <<<"$raw" | yaml2json | jq -ce '[.jobs[]? | .with // empty][0] // error("no with: block")' || {
-    echo "loop-config: .github/workflows/$file on $ref has no job with a with: block" >&2; return 1; }
+  base64 -d <<<"$raw" | yaml2json | jq -ce --arg wf "$wf" '
+    [.jobs[]? | select((.uses // "") | test("\\A[^/]+/agent-loop/\\.github/workflows/" + $wf + "\\.yml@")) | .with // {}][0]
+    // error("no job calls agent-loop")' || {
+    echo "loop-config: .github/workflows/$file on $ref has no job that calls agent-loop's $wf.yml" >&2; return 1; }
 }
 
-d=$(caller_with "$dev")
-r=$(caller_with "$review")
+d=$(caller_with "$dev" dev)
+r=$(caller_with "$review" review)
 
 jq -n --arg repo "$repo" --arg ref "$ref" --argjson d "$d" --argjson r "$r" '
   def s: if . == null then "" else tostring end;

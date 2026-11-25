@@ -20,8 +20,9 @@
 # The decision is lib/merge-gate.jq (merge_gate).
 #
 # Usage: merge-gate.sh PR [--check]     --check: decide and print, never enable auto-merge
-# Env:   GITHUB_REPOSITORY (default: the current directory's repo), LOOP_REPO (default
-#        tonhe/agent-loop), DEV_CALLER, REVIEW_CALLER (see loop-config.sh)
+# Env:   GITHUB_REPOSITORY (default: the current directory's repo). Nothing else: the
+#        caller file names are the standard ones and the loop's own repository is fixed,
+#        so an agent cannot point the gate at a laxer file or another "loop repo".
 # Exit:  0 allowed (and auto-merge enabled unless --check), 1 refused, 2 usage error.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,7 +32,8 @@ check_only=false
 [[ "$pr" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "usage: merge-gate.sh PR [--check]" >&2; exit 2; }
 repo=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}
 export GITHUB_REPOSITORY=$repo
-loop_repo=${LOOP_REPO:-tonhe/agent-loop}
+unset DEV_CALLER REVIEW_CALLER LOOP_REPO
+loop_repo=tonhe/agent-loop
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 trap 'echo "merge-gate: REFUSED #$pr: a step failed (line $LINENO); nothing was enabled" >&2' ERR
 
@@ -59,7 +61,7 @@ fi
 changed=$(gh api "repos/$repo/pulls/$pr" --jq .changed_files)
 gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" \
   --jq '[.[] | .filename, (.previous_filename // empty)]' | jq -s 'add // []' > "$work/files.json"
-listed=$(gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" --jq '.[].filename' | wc -l)
+listed=$(gh api --paginate "repos/$repo/pulls/$pr/files?per_page=100" --jq 'length' | jq -s 'add // 0')
 
 # protected_paths are git pathspecs, matched by git itself (the same test as check-diff.sh).
 mapfile -t specs < <(jq -r .protected_paths "$work/config.json" | sed '/^[[:space:]]*$/d')
@@ -100,4 +102,6 @@ if $check_only; then
   exit 0
 fi
 echo "merge-gate: ALLOWED https://github.com/$repo/pull/$pr; enabling auto-merge"
-MERGE_GATE_PASSED=1 bash "$here/scripts/enable-automerge.sh" "$pr"
+# Pinned to the commit checked above: a push after this point is not merged on this
+# approval (GitHub refuses the merge when the head no longer matches).
+HEAD_SHA=$sha bash "$here/scripts/enable-automerge.sh" "$pr"

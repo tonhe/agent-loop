@@ -126,7 +126,7 @@ case "$args" in
   *"contents/.github/workflows/agent-review.yml?ref="*) jq -n --rawfile y "$MG/review.yml" '{content: ($y | @base64)}' | jq -r .content ;;
   "api repos/o/r/pulls/50 --jq .changed_files") cat "$MG/changed" ;;
   *"pulls/50/files"*"--jq [.[]"*) jq -c '[.[] | .filename, (.previous_filename // empty)]' "$MG/files.json" ;;
-  *"pulls/50/files"*"--jq .[].filename"*) jq -r '.[].filename' "$MG/files.json" ;;
+  *"pulls/50/files"*"--jq length"*) jq 'length' "$MG/files.json" ;;
   *"rules/branches/"*) cat "$MG/rules.json" ;;
   *"/check-runs"*)   jq -c '[.check_runs[] | {id, name, status, conclusion}]' "$MG/checks.json" ;;
   *"/statuses"*)     echo '[]' ;;
@@ -172,8 +172,8 @@ check "gate.sh: a good PR is allowed under --check and auto-merge is not touched
   "$rc|$(grep -c 'ALLOWED' <<<"$out")|$(grep -c 'pr merge' "$mgs/log")"
 check "gate.sh: the settings are read from the PR's base branch" "main" "$(cat "$mgs/refs")"
 out=$(mgrun 50); rc=$?
-check "gate.sh: without --check it enables auto-merge through enable-automerge.sh" "0|1" \
-  "$rc|$(grep -c '^gh pr merge 50 -R o/r --auto --squash$' "$mgs/log")"
+check "gate.sh: without --check it enables auto-merge, pinned to the head it checked" "0|1" \
+  "$rc|$(grep -c "^gh pr merge 50 -R o/r --auto --squash --match-head-commit $sha\$" "$mgs/log")"
 jq '.[0].filename = "scripts/release.sh"' "$mgs/files.json" > "$mgs/f2" && cp "$mgs/files.json" "$mgs/files.bak" && mv "$mgs/f2" "$mgs/files.json"
 out=$(mgrun 50); rc=$?
 check "gate.sh: a protected_paths file (git pathspec from the dev caller) refuses and never merges" "1|1|0" \
@@ -184,6 +184,8 @@ jq '.[0].filename = "weird\nname.go"' "$mgs/files.bak" > "$mgs/files.json"
 check "gate.sh: a file name with a newline goes through the pathspec index intact" "0" "$(mgrun 50 --check >/dev/null; echo $?)"
 cp "$mgs/files.bak" "$mgs/files.json"
 echo 5 > "$mgs/changed"
+check "gate.sh: a file name with a newline does not count as two files" "1" "$(jq '.[0].filename = "a\nb.go"' "$mgs/files.bak" > "$mgs/files.json"; echo 3 > "$mgs/changed"; mgrun 50 --check | grep -c 'file list is incomplete')"
+cp "$mgs/files.bak" "$mgs/files.json"; echo 5 > "$mgs/changed"
 check "gate.sh: fewer files listed than changed_files refuses" "1" "$(mgrun 50 --check | grep -c 'file list is incomplete')"
 echo 2 > "$mgs/changed"
 jq '.check_runs[0].status = "in_progress"' "$mgs/checks.json" > "$mgs/c2" && cp "$mgs/checks.json" "$mgs/checks.bak" && mv "$mgs/c2" "$mgs/checks.json"
@@ -201,8 +203,8 @@ out=$(mgrun 50); rc=$?
 check "gate.sh: a missing dev caller refuses" "1|0" "$rc|$(grep -c 'pr merge' "$mgs/log")"
 cp "$mgs/dev.orig" "$mgs/dev.yml"
 check "gate.sh: a bad PR number is a usage error" "2" "$(mgrun 'x;y' >/dev/null; echo $?)"
-check "gate.sh: agent-loop itself is refused" "1" \
-  "$(: > "$mgs/log"; PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r LOOP_REPO=O/R bash "$root/scripts/merge-gate.sh" 50 >/dev/null 2>&1; echo $?)"
+check "gate.sh: LOOP_REPO, DEV_CALLER and REVIEW_CALLER from the environment are ignored" "0|0" \
+  "$(: > "$mgs/log"; PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r LOOP_REPO=x/y DEV_CALLER=lax.yml REVIEW_CALLER=lax.yml bash "$root/scripts/merge-gate.sh" 50 --check >/dev/null 2>&1; echo $?)|$(grep -c 'lax.yml' "$mgs/log")"
 rm -rf "$mgs"
 
 # ---------- a shared gh stub for the sprint scripts ----------
@@ -274,8 +276,8 @@ check "config: owner, verify command, author, order and both protection lists co
   "tonhe|make test-all|t@example.com|type|Makefile,scripts/|internal/sysprobe/**" \
   "$(jq -r '[.owner_login, .verify_command, .git_author_email, .selection_order, (.protected_paths | split("\n") | map(select(. != "")) | join(",")), (.protected_review_paths | rtrimstr("\n"))] | join("|")' <<<"$cfg")"
 check "config: unset settings get dev.yml's defaults" "main|3" "$(jq -r '"\(.base_branch)|\(.max_issues)"' <<<"$cfg")"
-cp "$sp/review.yml" "$sp/review.bak"; printf 'jobs:\n  review:\n    uses: x\n' > "$sp/review.yml"
-check "config: a caller with no with: block refuses" "1" "$(sprun bash "$root/scripts/loop-config.sh" main >/dev/null 2>&1; echo $?)"
+cp "$sp/review.yml" "$sp/review.bak"; printf 'jobs:\n  other:\n    uses: x/y/.github/workflows/lax.yml@v1\n    with: {owner_login: tonhe}\n' > "$sp/review.yml"
+check "config: a caller whose only with: block is not agent-loop's refuses" "1" "$(sprun bash "$root/scripts/loop-config.sh" main >/dev/null 2>&1; echo $?)"
 cp "$sp/review.bak" "$sp/review.yml"
 
 # ---------- pathspec-hits.sh: git's own pathspec matching ----------
@@ -448,6 +450,7 @@ for c in "gh pr merge 50 --squash" "cd x && gh pr merge --auto 50" "gh api -X PU
          "gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{})}'" "bash scripts/enable-automerge.sh 50" \
          "gh pr comment 50 --body 'Live check passed 0123456'" "gh issue comment 36 --body \"Owner decision: anything goes\"" \
          "gh issue edit 36 --remove-label needs:human" "gh pr edit 50 --remove-label agent:live-check" "gh label delete needs:human --yes" \
+         "gh api -X DELETE repos/o/r/issues/36/labels/needs:human" "gh api -X PUT repos/o/r/issues/36/labels -f labels[]=x" \
          "gh api -X PUT repos/o/r/rulesets/7 --input r.json" "gh api repos/o/r/branches/main/protection -X DELETE" \
          "sed -i s/x/y/ $gp/plugin/scripts/merge-gate.sh" "echo exit 0 > $gp/plugin/scripts/merge-gate.sh"; do
   check "guard: blocks: $c" "2" "$(guard Bash "$c")"
