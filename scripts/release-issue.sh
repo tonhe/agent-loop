@@ -59,6 +59,12 @@ action=$(jq -r '.action' "$w/release.json")
 note=$(jq -r '.note' "$w/release.json")
 if [[ "$action" == none ]]; then
   echo "Release check: $note."
+  # A release is due but the owner's own hand-written issue has the title: nothing is
+  # written, and the digest says why (lib/release.jq, notify).
+  if [[ $(jq -r '.notify // false' "$w/release.json") == true && "$dry" != true ]]; then
+    printf '**Release: %s** %s.\n' "$name" "$note" | bash "$here/scripts/discord.sh" >/dev/null \
+      || echo "::warning::Could not post the release notice to Discord." >&2
+  fi
   exit 0
 fi
 

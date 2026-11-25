@@ -68,16 +68,19 @@ def milestone_for($version):
          | select($rank != null) | {rank: $rank, m: .}]
   | sort_by([.rank, .m.number]) | .[0].m;
 
-# release_reasons($now; $days): {commits: [commit_info], milestones: [{title, open_issues,
-# closed_issues}]} -> [why a release is due]; [] when it is not.
+# release_reasons($now; $days; $version): {commits: [commit_info], milestones: [{number,
+# title, open_issues, closed_issues}]} -> [why a release is due]; [] when it is not.
 #   (a) the oldest unreleased fix commit is more than $days days old ($now: epoch seconds)
-#   (b) an open milestone has no open issues left (and at least one closed: a milestone
-#       nobody has put anything in yet is not finished)
-def release_reasons($now; $days):
+#   (b) the open milestone for $version (milestone_for) has no open issues left (and at
+#       least one closed: a milestone nobody has put anything in yet is not finished).
+#       Only that milestone counts: a finished "Backlog cleanup" or a milestone for some
+#       other version says nothing about the version being proposed.
+def release_reasons($now; $days; $version):
   ([.commits[] | select(.type == "fix") | .date | select(. != null)] | min) as $oldest
+  | ((.milestones // []) | milestone_for($version)) as $ms
   | [ (if $oldest != null and (($now - ($oldest | fromdateiso8601)) > ($days * 86400))
        then "the oldest unreleased fix landed on \($oldest[:10]), more than \($days) days ago" else empty end),
-      (.milestones[] | select((.open_issues // 0) == 0 and (.closed_issues // 0) > 0)
+      ($ms | select(. != null) | select((.open_issues // 0) == 0 and (.closed_issues // 0) > 0)
        | "milestone \(.title | safe_line(80)) has no open issues left") ];
 
 # grouped: [commit_info] -> [{prefix, commits}] : feat, fix, the other prefixes by name,
@@ -88,23 +91,68 @@ def grouped:
   | map({prefix: .[0].prefix, commits: .})
   | sort_by([(if .prefix == "feat" then 0 elif .prefix == "fix" then 1 elif .prefix == "other" then 3 else 2 end), .prefix]);
 
-# existing_release($owner): [open issues {number, title, author, labels}] -> the owner's
-# open release issue | null. Exact title, the owner as author AND the release label:
-# an issue someone else opened with the same title is never touched.
+# loop_release($owner): issue {title, body, author, labels} -> true when it is a release
+# issue this loop filed: exact title, the owner as author, the release label AND the
+# "<!-- agent-release -->" marker release_body puts in the body. All four.
+def loop_release($owner):
+  ((.title // "") | test("\\ARelease v[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
+  and .author.login == $owner
+  and ([.labels[]?.name] | index("release") != null)
+  and ((.body // "") | contains("<!-- agent-release -->"));
+
+# existing_release($owner): [open issues {number, title, body, author, labels}] -> the
+# open release issue the loop filed for the owner | null. An issue someone else opened
+# with the same title is never touched, and neither is one the owner wrote by hand: it
+# has no marker, so it is not ours to overwrite.
 def existing_release($owner):
-  [.[] | select(((.title // "") | test("\\ARelease v[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
-                and .author.login == $owner
-                and ([.labels[]?.name] | index("release") != null))]
+  [.[] | select(loop_release($owner))] | sort_by(.number) | .[0];
+
+# handwritten_release($owner; $title): [open issues] -> the owner's open issue with
+# exactly $title that the loop did not file | null. While it is open no second issue
+# with that title is opened and none is retitled to it.
+def handwritten_release($owner; $title):
+  [.[] | select(.title == $title and .author.login == $owner and (loop_release($owner) | not))]
   | sort_by(.number) | .[0];
 
 # release_body($tag; $version; $reasons; $milestone; $slip): [commit_info] -> Markdown.
 #   $milestone: the matching milestone | null     $slip: [open issue numbers in it]
 # Commit text is not the owner's words: every piece goes through safe_line, sits inside
 # a list item, and the whole body goes through defang_base.
+#
+# Size: GitHub refuses an issue body over 65,536 characters, and the edit would fail
+# every night from then on. The body is kept at or under release_body_limit: the draft
+# notes are capped per section, and the commit list, the only part that grows without
+# bound, is cut where it stops fitting and ends with one "…and N more" line. The marker
+# on the first line and the Would slip section after the list are never cut.
+def release_body_limit: 60000;
 def release_body($tag; $version; $reasons; $milestone; $slip):
   def capped($n): if length > $n then .[:$n] + ["- ...and \(length - $n) more"] else . end;
   def note_line: "- " + (if .scope != null and .scope != "" then "**\(.scope | safe_line(40)):** " else "" end) + (.desc | safe_line);
   def section($title; $lines): ["### \($title)", ""] + (if ($lines | length) > 0 then ($lines | capped(50)) else ["None."] end) + [""];
+  # Commit list entries: {s: line, c: 1 for a commit line, m: commits a "more" line stands for}.
+  def entries:
+    grouped
+    | map((.commits | length) as $n
+          | [{s: "**\(.prefix | safe_line(40))** (\($n))"}, {s: ""}]
+            + [.commits[:50][] | {s: ("- `\(.sha[:7])` " + (.subject | safe_line)), c: 1}]
+            + (if $n > 50 then [{s: "- ...and \($n - 50) more", m: ($n - 50)}] else [] end)
+            + [{s: ""}])
+    | add // [];
+  def counted: map((.c // 0) + (.m // 0)) | add // 0;
+  # fit($budget): entries -> the longest leading run whose lines, joined, take at most
+  # $budget characters; when something had to go, headings left dangling at the end are
+  # dropped and one line says how many commits are not listed.
+  def fit($budget):
+    . as $all
+    | (reduce $all[] as $e ({n: 0, used: 0, full: false};
+         if .full then .
+         else (.used + ($e.s | length) + 1) as $u
+           | if $u > $budget then .full = true else .n += 1 | .used = $u end
+         end) | .n) as $n
+    | if $n == ($all | length) then $all
+      else ($all[:$n] | until(length == 0 or (.[-1].c // .[-1].m) != null; .[:-1])) as $kept
+        | $kept + [{s: "- …and \(($all | counted) - ($kept | counted)) more commit(s) not listed here: the issue body would be too long"}, {s: ""}]
+      end;
   . as $commits
   | ($commits | bump) as $bump
   | [$commits[] | select(.breaking)] as $breaking
@@ -122,9 +170,8 @@ def release_body($tag; $version; $reasons; $milestone; $slip):
       + section("Features"; [$commits[] | select(.type == "feat") | note_line])
       + section("Fixes"; [$commits[] | select(.type == "fix") | note_line])
       + [ "## Commits since `\($tag)`", "" ]
-      + ($commits | grouped | map(["**\(.prefix | safe_line(40))** (\(.commits | length))", ""]
-                                  + ([.commits[] | "- `\(.sha[:7])` " + (.subject | safe_line)] | capped(50)) + [""]) | add // [])
-      + [ "## Would slip", "" ]
+    ) as $head
+  | ( [ "## Would slip", "" ]
       + [ if $milestone == null then
             "No open milestone is named `\($version)` (or `\($version | ltrimstr("v"))`, or the same without the patch number), so nothing is recorded as slipping."
           elif ($slip | length) == 0 then
@@ -133,18 +180,28 @@ def release_body($tag; $version; $reasons; $milestone; $slip):
             "Still open in milestone **\($milestone.title | safe_line(80))**; these miss the release unless they land first: "
             + ($slip | sort | map("#\(.)") | join(", "))
           end ]
-    ) | join("\n") | defang_base;
+    ) as $tail
+  # What the list may take: the limit, less the other two parts, the joining newlines
+  # and room for the "…and N more" line.
+  | (release_body_limit - ($head | join("\n") | length) - ($tail | join("\n") | length) - 200) as $budget
+  | ($head + ($commits | entries | fit($budget) | map(.s)) + $tail)
+  | join("\n") | defang_base
+  # Cannot happen with the caps above; if it ever does, the end goes, never the marker.
+  | if length > release_body_limit then .[:release_body_limit] else . end;
 
 # release_decision($owner; $now; $days):
 #   {tag: "vX.Y.Z" | null, commits: [{sha, message, date}] (default branch, since the tag),
 #    milestones: [open milestones {number, title, open_issues, closed_issues}],
 #    issues: [open issues {number, title, body, author, labels, milestone}]}
-#   -> {action, note, version, title, body, issue, reasons}
+#   -> {action, note, version, title, body, issue, reasons, notify}
 #   action: "none"    nothing to do (note says why)
 #           "create"  open a new issue        "update"  edit the body of issue
 #           "retitle" the version changed: edit the title and body of issue
+#   notify: true when "none" is something the owner should hear about in the digest:
+#           an issue would have been opened or retitled, but the owner already has a
+#           hand-written issue with that title. It is left exactly as it is.
 def release_decision($owner; $now; $days):
-  def none($note): {action: "none", note: $note, version: null, title: null, body: null, issue: null, reasons: []};
+  def none($note): {action: "none", note: $note, version: null, title: null, body: null, issue: null, reasons: [], notify: false};
   def norm: (. // "") | gsub("\r"; "") | sub("\n+\\z"; "");
   if .tag == null then none("no vX.Y.Z tag yet, so there is no version to count from")
   elif (.commits | length) == 0 then none("no commits since \(.tag)")
@@ -153,14 +210,21 @@ def release_decision($owner; $now; $days):
     | (.commits | map(commit_info)) as $commits
     | ($commits | next_version($tag)) as $version
     | "Release \($version)" as $title
-    | ({commits: $commits, milestones: .milestones} | release_reasons($now; $days)) as $reasons
+    | ({commits: $commits, milestones: .milestones} | release_reasons($now; $days; $version)) as $reasons
     | (.issues | existing_release($owner)) as $old
+    | (.issues | handwritten_release($owner; $title)) as $hand
     | (.milestones | milestone_for($version)) as $ms
     | (if $ms == null then [] else [.issues[] | select(.milestone != null and .milestone.number == $ms.number) | .number] end) as $slip
     | ($commits | release_body($tag; $version; $reasons; $ms; $slip)) as $body
-    | {action: "none", note: "", version: $version, title: $title, body: $body, issue: ($old.number // null), reasons: $reasons}
+    | {action: "none", note: "", version: $version, title: $title, body: $body, issue: ($old.number // null), reasons: $reasons, notify: false}
     | if $old == null and ($reasons | length) == 0 then
-        none("\($commits | length) commit(s) since \($tag), but no fix older than \($days) days and no finished milestone")
+        none("\($commits | length) commit(s) since \($tag), but no fix older than \($days) days and no finished milestone for \($version)")
+      elif $hand != null and ($old == null or $old.title != $title) then
+        # Never a second issue with the owner's title, and never an edit of theirs.
+        none("#\($hand.number) is titled \($title) but was not filed by the loop (it needs the `release` label and the loop's marker), so it is left alone and no second \($title) issue is "
+             + (if $old == null then "opened" else "made by retitling #\($old.number)" end)
+             + ". Close or rename #\($hand.number) to get the proposal")
+        | .notify = true | .version = $version | .title = $title | .reasons = $reasons
       elif $old == null then .action = "create" | .note = "open \($title): \($reasons | join("; "))"
       elif $old.title != $title then .action = "retitle" | .note = "#\($old.number): \($old.title) becomes \($title)"
       elif ($old.body | norm) == ($body | norm) then .note = "#\($old.number) \($title) is up to date"

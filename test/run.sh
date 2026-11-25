@@ -688,27 +688,35 @@ check "release: milestone title trimmed"                  "3"    "$(mf "$mss" v1
 check "release: milestone X.Y"                            "4"    "$(mf "$mss" v1.5.2)"
 check "release: milestone must be the version exactly"    "null" "$(mf "$mss" v1.6.0)"
 day=86400; t0=$(date -u -d '2026-02-01T00:00:00Z' +%s)
-rr() { jq -c -L "$root/lib" --argjson now "$2" 'include "release"; {commits: (.commits | map(commit_info)), milestones: (.milestones // [])} | release_reasons($now; 7) | length' <<<"$1"; }
+rr() { jq -c -L "$root/lib" --argjson now "$2" --arg v "${3:-v1.2.4}" 'include "release"; {commits: (.commits | map(commit_info)), milestones: (.milestones // [])} | release_reasons($now; 7; $v) | length' <<<"$1"; }
 fixc='{"commits":[{"message":"fix: old","date":"2026-02-01T00:00:00Z"},{"message":"fix: newer","date":"2026-02-05T00:00:00Z"},{"message":"feat: ancient","date":"2025-01-01T00:00:00Z"}]}'
 check "release: oldest fix exactly 7 days old -> not due"   "0" "$(rr "$fixc" $((t0 + 7*day)))"
 check "release: oldest fix more than 7 days old -> due"     "1" "$(rr "$fixc" $((t0 + 7*day + 1)))"
 check "release: an old feat alone does not trigger"         "0" "$(rr '{"commits":[{"message":"feat: ancient","date":"2025-01-01T00:00:00Z"}]}' "$t0")"
-check "release: finished milestone -> due"                  "1" "$(rr '{"commits":[{"message":"docs: x","date":"2026-02-01T00:00:00Z"}],"milestones":[{"title":"v1.3","open_issues":0,"closed_issues":4},{"title":"v1.4","open_issues":2,"closed_issues":0}]}' "$t0")"
-check "release: a milestone nobody has used yet is not finished" "0" "$(rr '{"commits":[{"message":"docs: x","date":"2026-02-01T00:00:00Z"}],"milestones":[{"title":"v1.4","open_issues":0,"closed_issues":0}]}' "$t0")"
-check "release: both triggers -> two reasons"               "2" "$(rr "$(jq -c '. + {milestones: [{"title":"v1.3","open_issues":0,"closed_issues":1}]}' <<<"$fixc")" $((t0 + 30*day)))"
+check "release: finished milestone -> due"                  "1" "$(rr '{"commits":[{"message":"docs: x","date":"2026-02-01T00:00:00Z"}],"milestones":[{"number":1,"title":"v1.3","open_issues":0,"closed_issues":4},{"number":2,"title":"v1.4","open_issues":2,"closed_issues":0}]}' "$t0" v1.3.0)"
+fin='{"commits":[{"message":"docs: x","date":"2026-02-01T00:00:00Z"}],"milestones":[{"number":1,"title":"v1.3","open_issues":0,"closed_issues":4},{"number":2,"title":"Backlog cleanup","open_issues":0,"closed_issues":9}]}'
+check "release: a finished milestone for another version does not trigger" "0" "$(rr "$fin" "$t0" v1.2.4)"
+check "release: a finished milestone that is not a version does not trigger" "0" "$(rr "$fin" "$t0" v1.4.0)"
+check "release: only the milestone of the computed version counts, once" "1" "$(rr "$fin" "$t0" v1.3.2)"
+check "release: a milestone nobody has used yet is not finished" "0" "$(rr '{"commits":[{"message":"docs: x","date":"2026-02-01T00:00:00Z"}],"milestones":[{"number":1,"title":"v1.4","open_issues":0,"closed_issues":0}]}' "$t0" v1.4.0)"
+check "release: both triggers -> two reasons"               "2" "$(rr "$(jq -c '. + {milestones: [{"number":1,"title":"v1.3","open_issues":0,"closed_issues":1}]}' <<<"$fixc")" $((t0 + 30*day)) v1.3.0)"
 check "release: grouped by prefix: feat, fix, others by name, no-prefix last" '["feat","fix","chore","docs","other"]' \
   "$(jq -c -L "$root/lib" 'include "release"; map({message: .} | commit_info) | grouped | map(.prefix)' <<<'["docs: a","Merge x","fix: b","chore: c","feat: d","fix(x): e"]')"
 check "release: group sizes" '[1,2,1,1,1]' \
   "$(jq -c -L "$root/lib" 'include "release"; map({message: .} | commit_info) | grouped | map(.commits | length)' <<<'["docs: a","Merge x","fix: b","chore: c","feat: d","fix(x): e"]')"
 er() { jq -c -L "$root/lib" 'include "release"; existing_release("tonhe") | .number?' <<<"$1"; }
-check "release: existing issue needs title, owner and label" "12" "$(er '[
-  {"number":10,"title":"Release v1.3.0","author":{"login":"mallory"},"labels":[{"name":"release"}]},
-  {"number":11,"title":"Release v1.3.0","author":{"login":"tonhe"},"labels":[]},
-  {"number":12,"title":"Release v1.2.4","author":{"login":"tonhe"},"labels":[{"name":"release"}]},
-  {"number":13,"title":"Release v1.3.0 notes","author":{"login":"tonhe"},"labels":[{"name":"release"}]},
-  {"number":14,"title":"Release v1.3.0\nx","author":{"login":"tonhe"},"labels":[{"name":"release"}]}]')"
+check "release: existing issue needs title, owner, label and the agent-release marker" "12" "$(er '[
+  {"number":9,"title":"Release v1.2.4","body":"My own checklist for this release.","author":{"login":"tonhe"},"labels":[{"name":"release"}]},
+  {"number":10,"title":"Release v1.3.0","body":"<!-- agent-release -->","author":{"login":"mallory"},"labels":[{"name":"release"}]},
+  {"number":11,"title":"Release v1.3.0","body":"<!-- agent-release -->","author":{"login":"tonhe"},"labels":[]},
+  {"number":12,"title":"Release v1.2.4","body":"<!-- agent-release -->\nx","author":{"login":"tonhe"},"labels":[{"name":"release"}]},
+  {"number":13,"title":"Release v1.3.0 notes","body":"<!-- agent-release -->","author":{"login":"tonhe"},"labels":[{"name":"release"}]},
+  {"number":14,"title":"Release v1.3.0\nx","body":"<!-- agent-release -->","author":{"login":"tonhe"},"labels":[{"name":"release"}]}]')"
 check "release: someone else's look-alike issue is never the existing one" "null" \
-  "$(er '[{"number":10,"title":"Release v1.3.0","author":{"login":"mallory"},"labels":[{"name":"release"}]}]')"
+  "$(er '[{"number":10,"title":"Release v1.3.0","body":"<!-- agent-release -->","author":{"login":"mallory"},"labels":[{"name":"release"}]}]')"
+check "release: the owner's hand-written Release issue (no marker) is never the existing one" "null" \
+  "$(er '[{"number":9,"title":"Release v1.2.4","body":"My own checklist.","author":{"login":"tonhe"},"labels":[{"name":"release"}]},
+          {"number":8,"title":"Release v1.2.4","body":null,"author":{"login":"tonhe"},"labels":[{"name":"release"}]}]')"
 
 rd() { jq -c -L "$root/lib" --argjson now "${2:-$((t0 + 30*day))}" 'include "release"; release_decision("tonhe"; $now; 7)' <<<"$1"; }
 rel_in=$(jq -nc '{tag: "v1.2.3",
@@ -744,18 +752,48 @@ check "release body: slipping issues follow the new version's milestone" "1" "$(
 d=$(rd "$rel_in" $((t0 + 2*day)))
 check "release decision: fix not old enough, no finished milestone -> nothing" '"none"' "$(jq -c '.action' <<<"$d")"
 d=$(rd "$(jq -c '.milestones[1] = {number: 2, title: "v1.3.0", open_issues: 0, closed_issues: 5}' <<<"$rel_in")" $((t0 + 2*day)))
-check "release decision: finished milestone triggers without an old fix" '"create"' "$(jq -c '.action' <<<"$d")"
+check "release decision: a finished milestone for another version (v1.3.0 while v1.2.4 is next) does not trigger" '"none"' "$(jq -c '.action' <<<"$d")"
+d=$(rd "$(jq -c '.milestones[0] = {number: 1, title: "v1.2", open_issues: 0, closed_issues: 5}' <<<"$rel_in")" $((t0 + 2*day)))
+check "release decision: the finished milestone of the computed version triggers without an old fix" '["create",["milestone v1.2 has no open issues left"]]' "$(jq -c '[.action, .reasons]' <<<"$d")"
 check "release decision: no tag -> nothing" '"none"' "$(rd '{"tag":null,"commits":[{"message":"fix: x","date":"2020-01-01T00:00:00Z"}],"milestones":[],"issues":[]}' | jq -c .action)"
 check "release decision: no commits since the tag -> nothing" '"none"' "$(rd '{"tag":"v1.0.0","commits":[],"milestones":[{"title":"v1.1","open_issues":0,"closed_issues":3}],"issues":[]}' | jq -c .action)"
+# GitHub refuses an issue body over 65,536 characters; the body stays at or under 60,000.
+big=$(jq -nc '{tag: "v1.2.3",
+  commits: [range(0; 4000) as $i | {sha: ("\($i + 1000000)" + "abcdef"), date: "2026-02-01T00:00:00Z",
+     message: ((if $i < 80 then "feat(" + ("s" * 60) + ")!: " elif $i < 160 then "fix(scope): "
+                else "t" + ([97 + ($i % 26), 97 + (($i / 26 | floor) % 5)] | implode) + ": " end)
+               + ("é" * 300) + "\n\nBREAKING CHANGE: " + ("x" * 300))}],
+  milestones: [{number: 1, title: "v1.3", open_issues: 400, closed_issues: 1}],
+  issues: [range(1000; 1400) | {number: ., title: "t", body: "", author: {login: "tonhe"}, labels: [], milestone: {number: 1}}]}')
+bigbody=$(rd "$big" | jq -r .body)
+check "release body: 4000 long commits still fit GitHub's limit (at most 60,000 characters)" "true" "$(jq -Rs 'length <= 60000' <<<"$bigbody")"
+check "release body: ... the marker is still the first line" "<!-- agent-release -->" "$(head -1 <<<"$bigbody")"
+check "release body: ... the commit list is cut with one '…and N more' line" "1" "$(grep -cE '^- …and [0-9]+ more commit\(s\) not listed' <<<"$bigbody")"
+check "release body: ... every commit is listed or counted" "4000" \
+  "$(sed -n '/^## Commits since /,/^## Would slip$/p' <<<"$bigbody" \
+      | awk '/^- `[0-9a-f]+` /{n++} /^- (\.\.\.|…)and [0-9]+ more/{n+=$3} END{print n+0}')"
+check "release body: ... the Would slip section after the list is whole" "1|1" \
+  "$(grep -c '^## Would slip$' <<<"$bigbody")|$(tail -1 <<<"$bigbody" | grep -c ', #1399$')"
+check "release body: a short commit list is not cut" "0" "$(rd "$rel_in" | jq -r .body | grep -c 'more commit(s) not listed')"
 cur_body=$(jq -r .body <<<"$(rd "$rel_in")")
 with_issue() { jq -c --arg t "$1" --arg b "$2" --arg a "${3:-tonhe}" '.issues += [{number: 30, title: $t, body: $b, author: {login: $a}, labels: [{name: "release"}], milestone: null}]' <<<"$rel_in"; }
-check "release decision: same version, body differs -> update" '["update",30]' "$(rd "$(with_issue 'Release v1.2.4' 'old body')" | jq -c '[.action, .issue]')"
+check "release decision: same version, body differs -> update" '["update",30]' "$(rd "$(with_issue 'Release v1.2.4' $'<!-- agent-release -->\nold body')" | jq -c '[.action, .issue]')"
 check "release decision: same version, same body -> nothing to do" '["none",30]' "$(rd "$(with_issue 'Release v1.2.4' "$cur_body"$'\r\n')" | jq -c '[.action, .issue]')"
-check "release decision: existing issue is refreshed even when no trigger holds" '"update"' "$(rd "$(with_issue 'Release v1.2.4' 'old body')" $((t0 + 2*day)) | jq -c '.action')"
-d=$(rd "$(with_issue 'Release v1.2.4' 'old body' | jq -c '.commits += [{sha: "e", message: "feat: x", date: "2026-02-04T00:00:00Z"}]')")
+check "release decision: existing issue is refreshed even when no trigger holds" '"update"' "$(rd "$(with_issue 'Release v1.2.4' $'<!-- agent-release -->\nold body')" $((t0 + 2*day)) | jq -c '.action')"
+d=$(rd "$(with_issue 'Release v1.2.4' $'<!-- agent-release -->\nold body' | jq -c '.commits += [{sha: "e", message: "feat: x", date: "2026-02-04T00:00:00Z"}]')")
 check "release decision: version changed -> retitle the same issue" '["retitle",30,"Release v1.3.0"]' "$(jq -c '[.action, .issue, .title]' <<<"$d")"
 check "release decision: someone else's Release issue is ignored -> create our own" '["create",null]' \
-  "$(rd "$(with_issue 'Release v1.2.4' 'old body' mallory)" | jq -c '[.action, .issue]')"
+  "$(rd "$(with_issue 'Release v1.2.4' $'<!-- agent-release -->\nold body' mallory)" | jq -c '[.action, .issue]')"
+d=$(rd "$(with_issue 'Release v1.2.4' 'My own release checklist.')")
+check "release decision: the owner's hand-written issue with that title is left alone, and no second one is opened" '["none",null,null,true]' \
+  "$(jq -c '[.action, .issue, .body, .notify]' <<<"$d")"
+check "release decision: ... and the note names it" "1" "$(jq -r .note <<<"$d" | grep -c '^#30 is titled Release v1.2.4 but was not filed by the loop')"
+check "release decision: a hand-written issue while no release is due is not worth a note" '["none",false]' \
+  "$(rd "$(with_issue 'Release v1.2.4' 'My own release checklist.')" $((t0 + 2*day)) | jq -c '[.action, .notify]')"
+d=$(rd "$(with_issue 'Release v1.2.4' $'<!-- agent-release -->\nold body' | jq -c '.commits += [{sha: "e", message: "feat: x", date: "2026-02-04T00:00:00Z"}]
+      | .issues += [{number: 31, title: "Release v1.3.0", body: "mine", author: {login: "tonhe"}, labels: [], milestone: null}]')")
+check "release decision: no retitle onto a title the owner already uses by hand" '["none",true]' "$(jq -c '[.action, .notify]' <<<"$d")"
+check "release decision: ordinary outcomes carry notify=false" 'false' "$(rd "$rel_in" | jq -c '.notify')"
 
 # ---------- release-issue.sh (stubbed gh) ----------
 rs=$(mktemp -d); mkdir -p "$rs/bin"
@@ -778,8 +816,9 @@ case "$1 $2" in
     while [[ $# -gt 0 ]]; do [[ "$1" == --body-file ]] && cp "$2" "$GHLOG.body"; shift; done ;;
 esac
 GH
-chmod +x "$rs/bin/gh"
-rsrun() { : > "$rs/log"; rm -f "$rs/log.body"; PATH="$rs/bin:$PATH" GHLOG="$rs/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe NOW_EPOCH=$((t0 + 30*day)) \
+printf '#!/usr/bin/env bash\ncat >> "$GHLOG.curl"\n' > "$rs/bin/curl"
+chmod +x "$rs/bin/gh" "$rs/bin/curl"
+rsrun() { : > "$rs/log"; : > "$rs/log.curl"; rm -f "$rs/log.body"; PATH="$rs/bin:$PATH" GHLOG="$rs/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe NOW_EPOCH=$((t0 + 30*day)) \
             bash "$root/scripts/release-issue.sh" "$rs/w" 2>"$rs/err"; }
 writes() { grep -cE '^(issue (create|edit|close|comment)|label |release |api -X|api .*(git/refs|git/tags|releases|deployments))' "$rs/log"; }
 cmp_json=$(jq -c '{commits: [.commits[] | {sha, commit: {message, committer: {date}}}]}' <<<"$rel_in")
@@ -798,7 +837,7 @@ check "release-issue: a missing Discord webhook does not fail the run" "0" "$rc"
 check "release-issue: never tags, releases or approves" "0" "$(grep -ciE 'git/refs|git/tags|releases|deployments|^release |tag ' "$rs/log")"
 out=$(R_TAGS="v1.2.3" R_COMPARE="$cmp_json" DRY_RUN=true rsrun); rc=$?
 check "release-issue: dry run prints and changes nothing" "0|1|0" "$rc|$(grep -c 'DRY RUN, would open "Release v1.2.4"' <<<"$out")|$(writes)"
-mine=$(jq -c '[{number: 30, title: "Release v1.2.4", body: "old", author: {login: "tonhe"}, labels: [{name: "release"}], milestone: null}]' <<<null)
+mine=$(jq -c '[{number: 30, title: "Release v1.2.4", body: "<!-- agent-release -->\nold", author: {login: "tonhe"}, labels: [{name: "release"}], milestone: null}]' <<<null)
 out=$(R_TAGS="v1.2.3" R_COMPARE="$cmp_json" R_ISSUES="$mine" rsrun)
 check "release-issue: open issue for the same version -> body edited, no second issue" "1|0" \
   "$(grep -c '^issue edit 30 -R o/r --body-file ' "$rs/log")|$(grep -c '^issue create' "$rs/log")"
@@ -814,6 +853,13 @@ check "release-issue: nothing changed -> no edit" "1|0" "$(grep -c 'is up to dat
 theirs=$(jq -c '.[0].author.login = "mallory"' <<<"$mine")
 out=$(R_TAGS="v1.2.3" R_COMPARE="$cmp_json" R_ISSUES="$theirs" rsrun)
 check "release-issue: someone else's look-alike is never edited" "0|1" "$(grep -c '^issue edit' "$rs/log")|$(grep -c '^issue create' "$rs/log")"
+hand=$(jq -c '.[0].body = "My own release checklist."' <<<"$mine")
+out=$(R_TAGS="v1.2.3" R_COMPARE="$cmp_json" R_ISSUES="$hand" DISCORD_WEBHOOK_URL=http://discord.invalid/hook rsrun); rc=$?
+check "release-issue: the owner's hand-written Release issue is never edited and no duplicate is opened" "0|0" "$rc|$(writes)"
+check "release-issue: ... and the run says so, in the log and in the Discord digest" "1|1" \
+  "$(grep -c 'Release check: #30 is titled Release v1.2.4 but was not filed by the loop' <<<"$out")|$(grep -c 'was not filed by the loop' "$rs/log.curl")"
+out=$(R_TAGS="v1.2.3" R_COMPARE="$cmp_json" R_ISSUES="$hand" DRY_RUN=true DISCORD_WEBHOOK_URL=http://discord.invalid/hook rsrun)
+check "release-issue: a dry run posts nothing to Discord" "0" "$(grep -c . "$rs/log.curl")"
 canary="$rs/pwned"
 evil=$(jq -nc --arg c "$canary" '{commits: [{sha: "f00", commit: {message: ("fix: $(touch " + $c + ") `touch " + $c + "` ; touch " + $c + " #\n\n\"; touch " + $c + "; \""), committer: {date: "2026-01-01T00:00:00Z"}}}]}')
 out=$(R_TAGS="v1.2.3" R_COMPARE="$evil" rsrun); rc=$?
