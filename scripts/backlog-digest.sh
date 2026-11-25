@@ -22,6 +22,11 @@ elif [[ "$work" == "true" && "$count" == "0" ]]; then
 else
   msg="**Backlog: $name** finished with status $status."
 fi
+# The blocker audit (scripts/audit-blockers.sh) runs whether or not there was anything to
+# triage; its text is empty when the blockers in text and the native links agree.
+if [[ -s "$w/audit.txt" ]]; then
+  msg+=$'\n'"$(cat "$w/audit.txt")"
+fi
 if [[ -s "$w/claude/usage.json" ]]; then
   msg+=$'\n'"Claude: $(jq -r '"\(.num_turns) turns, \(.duration_ms/60000 | floor) min"' "$w/claude/usage.json")"
 fi
