@@ -925,6 +925,93 @@ check "apply (real run): the digest starts with the header and the summary" "**B
 check "apply (real run): one line per issue, none twice" "25|25" "$(grep -c '^- #[0-9]' <<<"$out")|$(grep '^- #[0-9]' <<<"$out" | sort -u | grep -c .)"
 check "apply (real run): the split is counted on its parent's line" "1" "$(grep -c '^- #3 +risk:low,type:docs split into 1$' <<<"$out")"
 check "apply (real run): the parent's comment still links the new issue" "1" "$(grep -c '^- https://github.com/o/r/issues/900$' "$ab/log")"
+
+# One gh call that fails must cost that one step of that one issue, not the rest of the
+# night: the loop goes on, the digest is printed with the failure on the issue's line, and
+# the script exits 6. This gh fails every call matching a line of $GH_FAIL (EREs), the way
+# the real one does: a message with a URL on stderr, nothing on stdout. $GH_EXISTING is
+# the number of an issue that already has an assessment comment.
+cat > "$ab/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GHLOG"
+if [[ -n "${GH_FAIL:-}" ]] && grep -qE -- "$GH_FAIL" <<<"$*"; then
+  echo "gh: HTTP 502 (https://api.github.com/repos/o/r)" >&2; exit 1
+fi
+case "$1 $2" in
+  "issue edit")    echo "https://github.com/o/r/issues/$3" ;;
+  "issue comment") echo "https://github.com/o/r/issues/$3#issuecomment-1" ;;
+  "issue create")  echo "https://github.com/o/r/issues/900" ;;
+  "api "*)         if [[ "$*" == *PATCH* ]]; then echo '{"id":1}'
+                   elif [[ -n "${GH_EXISTING:-}" && "$2" == "repos/o/r/issues/$GH_EXISTING/comments" ]]; then echo 77; fi ;;
+esac
+GH
+jq -nc '[range(1; 4) | {number: ., title: "t"}]' > "$ab/w/candidates.json"
+echo '{"1":[],"2":[],"3":[]}' > "$ab/w/current-labels.json"
+jq -nc '{summary: "Triaged 3 issues.", actions: [range(1; 4) | {issue: ., add_labels: ["risk:low", "type:docs"], remove_labels: [], assessment: "MODELTEXT"}
+          | if .issue == 3 then . + {split_into: [{title: "MODELTITLE", body: "do part"}]} else . end]}' > "$ab/w/claude/result.json"
+abfail() { : > "$ab/log"; PATH="$ab/bin:$PATH" GHLOG="$ab/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe DRY_RUN=${DRY:-false} \
+             bash "$root/scripts/apply-backlog.sh" "$ab/w" 2>"$ab/err"; }
+abline() { grep "^- #$1\( \|\$\)" <<<"$out"; }
+abhead() { sed -n '1,2p' <<<"$out" | paste -sd'|' -; }
+
+out=$(abfail); rc=$?
+ab_clean=$out
+check "apply (no failure): exit 0, and the lines read as they always did" "0|- #1 +risk:low,type:docs|- #2 +risk:low,type:docs|- #3 +risk:low,type:docs split into 1" \
+  "$rc|$(abline 1)|$(abline 2)|$(abline 3)"
+check "apply (no failure): nothing says FAILED, no warning, no error" "0|0" "$(grep -c 'FAILED' <<<"$out")|$(grep -c '^::' "$ab/err")"
+
+out=$(GH_FAIL='^issue edit 2 ' abfail); rc=$?
+check "apply (label edit fails for #2 of three): exit 6, not 0 and not 5" "6" "$rc"
+check "apply (label edit fails): the digest is printed, header and summary first" "**Backlog: r**|Triaged 3 issues." "$(abhead)"
+check "apply (label edit fails): all three issues have a line" "3" "$(grep -c '^- #[0-9]' <<<"$out")"
+check "apply (label edit fails): the line names the step and claims no label change" "- #2 FAILED: label edit (wanted +risk:low,type:docs); see the log" "$(abline 2)"
+check "apply (label edit fails): the other two are applied and reported as before" "- #1 +risk:low,type:docs|- #3 +risk:low,type:docs split into 1|1|1" \
+  "$(abline 1)|$(abline 3)|$(grep -c '^issue edit 1 -R o/r --add-label risk:low,type:docs$' "$ab/log")|$(grep -c '^issue edit 3 -R o/r --add-label risk:low,type:docs$' "$ab/log")"
+check "apply (label edit fails): the loop went on: #2 still gets its comment, #3 its split" "3|1" "$(grep -c '^issue comment ' "$ab/log")|$(grep -c '^issue create ' "$ab/log")"
+check "apply (label edit fails): the digest counts the failed issues above the lines" "1" "$(grep -c '^\*\*FAILED: 1 of 3 issue(s) had a step that failed' <<<"$out")"
+check "apply (label edit fails): one warning, naming the issue and the step" "1|1" "$(grep -c '^::warning::' "$ab/err")|$(grep -c '^::warning::Backlog apply: labels failed for #2 ' "$ab/err")"
+check "apply (label edit fails): one error at the end, and no model text in any annotation" "1|0" "$(grep -c '^::error::Backlog apply: 1 of 3 ' "$ab/err")|$(grep '^::' "$ab/err" | grep -c 'MODEL')"
+check "apply (label edit fails): no URL in the digest" "0" "$(grep -c 'https\?://' <<<"$out")"
+
+out=$(GH_FAIL='^issue comment 2 ' abfail); rc=$?
+check "apply (comment post fails): exit 6; the labels were changed and the line says both" "6|- #2 +risk:low,type:docs FAILED: comment not posted; see the log" "$rc|$(abline 2)"
+check "apply (comment post fails): the other two are untouched by it" "- #1 +risk:low,type:docs|- #3 +risk:low,type:docs split into 1|2" "$(abline 1)|$(abline 3)|$(grep -c '^issue edit [13] -R o/r --add-label' "$ab/log")"
+check "apply (comment post fails): warning names #2 and the step; no URL in the digest" "1|0" "$(grep -c '^::warning::Backlog apply: comment failed for #2 ' "$ab/err")|$(grep -c 'https\?://' <<<"$out")"
+
+out=$(GH_EXISTING=2 GH_FAIL='^api -X PATCH ' abfail); rc=$?
+check "apply (comment update fails): exit 6; the line says the comment was not updated" "6|- #2 +risk:low,type:docs FAILED: comment not updated; see the log" "$rc|$(abline 2)"
+check "apply (comment update fails): no second comment is posted instead" "0|2" "$(grep -c '^issue comment 2 ' "$ab/log")|$(grep -c '^issue comment ' "$ab/log")"
+
+out=$(GH_FAIL='^api repos/o/r/issues/2/comments ' abfail); rc=$?
+check "apply (comment lookup fails): exit 6; the line says why there is no comment" "6|- #2 +risk:low,type:docs FAILED: comment not posted (could not look for an earlier one); see the log" "$rc|$(abline 2)"
+check "apply (comment lookup fails): nothing is posted blind for #2, the others get theirs" "0|0|2" \
+  "$(grep -c '^issue comment 2 ' "$ab/log")|$(grep -c '^api -X PATCH ' "$ab/log")|$(grep -c '^issue comment ' "$ab/log")"
+check "apply (comment lookup fails): warning names #2 and the step; header intact; no URL" "1|**Backlog: r**|Triaged 3 issues.|0" \
+  "$(grep -c '^::warning::Backlog apply: comment lookup failed for #2 ' "$ab/err")|$(abhead)|$(grep -c 'https\?://' <<<"$out")"
+
+out=$(GH_FAIL='^issue create ' abfail); rc=$?
+check "apply (split create fails): exit 6; the line claims no split" "6|- #3 +risk:low,type:docs FAILED: 1 split issue(s) not filed; see the log" "$rc|$(abline 3)"
+check "apply (split create fails): the parent still gets its comment, without a Split list" "1|0" "$(grep -c '^issue comment 3 ' "$ab/log")|$(grep -c '^### Split into' "$ab/log")"
+check "apply (split create fails): #1 and #2 as before; the warning carries no model title" "- #1 +risk:low,type:docs|- #2 +risk:low,type:docs|1|0" \
+  "$(abline 1)|$(abline 2)|$(grep -c '^::warning::Backlog apply: split failed for #3 ' "$ab/err")|$(grep '^::' "$ab/err" | grep -c 'MODEL')"
+check "apply (split create fails): no URL in the digest" "0" "$(grep -c 'https\?://' <<<"$out")"
+
+# The child was filed, then the parent's comment failed: the child exists and nothing links it.
+out=$(GH_FAIL='^issue comment 3 ' abfail); rc=$?
+check "apply (comment fails after a split): the line says the child exists" "6|- #3 +risk:low,type:docs split into 1 FAILED: comment not posted (split issue(s) #900 filed, not linked from #3); see the log" "$rc|$(abline 3)"
+check "apply (comment fails after a split): the child is named by number, never by URL" "0" "$(grep -c 'https\?://' <<<"$out")"
+
+out=$(GH_FAIL='.' abfail); rc=$?
+check "apply (every gh call fails): exit 6 and the digest is still printed from the top" "6|**Backlog: r**|Triaged 3 issues." "$rc|$(abhead)"
+check "apply (every gh call fails): every issue has its line, each marked FAILED" "3|3" "$(grep -c '^- #[0-9]' <<<"$out")|$(grep -c '^- #[0-9]* FAILED: label edit (wanted +risk:low,type:docs); .*comment not posted.*; see the log$' <<<"$out")"
+check "apply (every gh call fails): the count, the closing lines, no URL" "1|1|0" \
+  "$(grep -c '^\*\*FAILED: 3 of 3 issue(s) had a step that failed' <<<"$out")|$(grep -c '^External issues waiting for you to adopt: none$' <<<"$out")|$(grep -c 'https\?://' <<<"$out")"
+
+# A dry run makes none of the writing calls, so a gh that refuses them changes nothing.
+out=$(DRY=true GH_FAIL='^(issue (edit|comment|create)|api -X) ' abfail); rc=$?
+check "apply (dry run): exit 0 and the same digest as a real run without failures" "0|same" "$rc|$([[ "$out" == "$ab_clean" ]] && echo same || echo differs)"
+check "apply (dry run): no writing call reached gh, no annotation" "0|0" "$(grep -cE '^(issue (edit|comment|create)|api -X) ' "$ab/log")|$(grep -c '^::' "$ab/err")"
+check "apply-backlog.sh: the header documents exit codes 5 and 6" "1" "$(sed -n '1,20p' "$root/scripts/apply-backlog.sh" | grep -c '^# Exit: .* 5 .* 6 ')"
 rm -rf "$ab"
 
 # ---------- shared gh stub for the dependency, base-branch and milestone tests ----------
