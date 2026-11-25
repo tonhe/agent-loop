@@ -2,6 +2,7 @@
 # Print an issue as Markdown for a prompt: title, body, and the OWNER's comments only.
 # Other people's comments are dropped so they cannot steer the agent.
 # Usage: issue-context.sh ISSUE_NUMBER      Env: GH_TOKEN, GITHUB_REPOSITORY, OWNER_LOGIN
+#        ISSUE_JSON_OUT (optional): also save the accepted issue's JSON to this file
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 n=$1
@@ -19,6 +20,9 @@ if [[ $(jq -r -L "$here/lib" 'include "meta"; is_meta_issue' <<<"$issue") != fal
   echo "::error::Issue #$n is a Release or Plan issue filed by the loop. Refusing to use it as prompt context." >&2
   exit 1
 fi
+# Optional: keep the accepted issue for a caller that needs more than the Markdown
+# (review-linked.sh). Written only after both checks above have passed.
+if [[ -n "${ISSUE_JSON_OUT:-}" ]]; then printf '%s\n' "$issue" > "$ISSUE_JSON_OUT"; fi
 
 jq -r --arg owner "$OWNER_LOGIN" '
   "### #\(.number): \(.title)\n",
