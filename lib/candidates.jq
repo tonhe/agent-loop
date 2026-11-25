@@ -7,6 +7,7 @@
 # owner commented after the last assessment (comment "/reassess" to force it).
 include "blocked";
 include "meta";
+include "glob";
 # Blocked issues are skipped entirely; they become candidates once their blockers close.
 # The Release and Plan issues the loop files itself (lib/meta.jq) are never candidates:
 # their bodies are built from commit messages or written by the model, and what happens
@@ -30,6 +31,10 @@ def is_assessment: (.body // "") | contains("<!-- agent-assessment -->");
       # numbered blocker in its body is one of these. Without this fact the model reads
       # "Blocked by #4" in the body and triages the issue as if #4 were still open.
       closed_blockers: [(.body | blockers)[] | select(. > 0)],
+      # Whether the owner has written an "Owner decision" comment on this issue (the test
+      # in lib/glob.jq, the same one the review uses). apply-backlog.sh reads this fact
+      # and validate-plan.jq then changes no label on the issue: triage may only comment.
+      owner_decision: ((.comments // []) | owner_decisions($owner) | length > 0),
       owner_comments: [$mine[] | {createdAt, body}],
       previous_assessment: ($a.body // null)
     }
