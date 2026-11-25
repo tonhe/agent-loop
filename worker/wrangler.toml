@@ -2,19 +2,15 @@ name = "agent-loop-trigger"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
 
-# The Worker has no HTTP interface; it only runs on its crons.
+# The Worker has no HTTP interface; it only runs on its cron.
 workers_dev = false
 preview_urls = false
 
-# UTC. Cloudflare's free plan allows five cron triggers per account, so the
-# jobs' crons in src/config.js are merged here into two. The Worker picks the
-# job by the time of day it fired at. These must fire at exactly the times the
-# config uses; `npm test` in this directory fails if they differ.
+# One trigger: a tick at :07, :17, :27, :37, :47 and :57 of every hour (UTC).
+# What runs at which tick is the table in src/config.js. Cloudflare's free plan
+# allows five cron triggers per account; this uses one.
 [triggers]
-crons = [
-  "17,27 6,7 * * *",   # 06:17 start triage, 06:27 check it; 07:17 start dev, 07:27 check it
-  "43,53 1,13 * * *",  # 01:43 and 13:43 start follow-up; 01:53 and 13:53 check it
-]
+crons = ["7-59/10 * * * *"]
 
 [observability]
 enabled = true

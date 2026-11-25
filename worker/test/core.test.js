@@ -3,34 +3,22 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { jobs, VERIFY_WINDOW_MINUTES, TOKEN_WARN_DAYS } from "../src/config.js";
-import {
-  allTimes,
-  alertDiscord,
-  cronTimes,
-  dispatchJob,
-  jobsForFiring,
-  normalizeCron,
-  parseTokenExpiry,
-  runCron,
-  tokenExpiryWarning,
-  verifyJob,
-} from "../src/core.js";
+import { schedule, TRIGGER, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "../src/config.js";
+import { alertDiscord, checkRow, dueAt, parseTokenExpiry, runTick, startRow, tickTime, tokenExpiryWarning } from "../src/core.js";
 
 const API = "https://api.github.test";
 const HOOK = "https://discord.test/hook";
-const NOW = Date.UTC(2026, 10, 26, 7, 17, 0);
+const utc = (h, m, day = 26) => Date.UTC(2026, 10, day, h, m, 0);
 
-// A fake fetch: answers by URL prefix and records every call.
+// A fake fetch: answers by URL fragment and records every call.
 function fakeFetch(routes) {
   const calls = [];
   const fn = async (url, init = {}) => {
     calls.push({ url, init, body: init.body ? JSON.parse(init.body) : undefined });
     for (const [match, answer] of routes) {
       if (url.includes(match)) {
-        const a = typeof answer === "function" ? answer(url, init) : answer;
-        if (a instanceof Error) throw a;
-        return new Response(a.body ?? null, { status: a.status, headers: a.headers });
+        if (answer instanceof Error) throw answer;
+        return new Response(answer.body ?? null, { status: answer.status, headers: answer.headers });
       }
     }
     throw new Error(`unexpected fetch ${url}`);
@@ -39,111 +27,119 @@ function fakeFetch(routes) {
   return fn;
 }
 
-const devJob = { repo: "o/r", workflow: "agent-dev.yml", ref: "main", inputs: { mode: "scheduled" }, cron: "17 7 * * *", verifyCron: "27 7 * * *" };
-const triageJob = { repo: "o/r", workflow: "agent-backlog.yml", ref: "main", cron: "17 6 * * *", verifyCron: "27 6 * * *", expiryAlert: true };
-const testJobs = [triageJob, devJob];
+const triage = { at: ["06:17"], repo: "o/r", workflow: "agent-backlog.yml", body: { ref: "main" } };
+const dev = { at: ["07:17"], repo: "o/r", workflow: "agent-dev.yml", body: { ref: "main", inputs: { mode: "scheduled" } } };
+const sweep = { at: ["01:47", "13:47"], repo: "o/r", workflow: "agent-followup.yml", body: { ref: "main" } };
+const late = { at: ["23:57"], repo: "o/two", workflow: "nightly.yml", body: { ref: "main" } };
+const table = [triage, dev, sweep, late];
 const env = { GITHUB_TOKEN: "t0ken", DISCORD_WEBHOOK_URL: HOOK, GITHUB_API: API };
 
-function run(cron, fetch, over = {}) {
-  return runCron({ cron, scheduledTime: NOW, jobs: testJobs, env, fetch, verifyWindowMinutes: 12, tokenWarnDays: 14, ...over });
+function tick(scheduledTime, fetch, over = {}) {
+  return runTick({ scheduledTime, schedule: table, env, fetch, checkAfterMinutes: 10, tokenCheckAt: "06:17", tokenWarnDays: 14, ...over });
 }
 
-function tomlCrons() {
-  const toml = readFileSync(fileURLToPath(new URL("../wrangler.toml", import.meta.url)), "utf8");
-  const block = toml.match(/\[triggers\]\s*crons\s*=\s*\[([^\]]*)\]/);
-  assert.ok(block, "wrangler.toml has a [triggers] crons list");
-  return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-}
+// ---- what is due at a tick ----
 
-test("the crons in wrangler.toml fire at exactly the times the config uses", () => {
-  const fired = tomlCrons().flatMap((c) => cronTimes(c));
-  assert.equal(new Set(fired).size, fired.length, "no time is fired twice");
-  assert.deepEqual(fired.sort(), allTimes(jobs));
-  assert.deepEqual(allTimes(jobs), ["01:43", "01:53", "06:17", "06:27", "07:17", "07:27", "13:43", "13:53"]);
+test("dueAt: a row starts on the tick equal to its time", () => {
+  assert.deepEqual(dueAt(table, utc(6, 17), 10), { time: "06:17", start: [triage], check: [] });
+  assert.deepEqual(dueAt(table, utc(7, 17), 10), { time: "07:17", start: [dev], check: [] });
 });
 
-test("wrangler.toml stays inside the free plan's five cron triggers", () => {
-  assert.ok(tomlCrons().length <= 5);
+test("dueAt: a row with two times starts on both", () => {
+  assert.deepEqual(dueAt(table, utc(1, 47), 10).start, [sweep]);
+  assert.deepEqual(dueAt(table, utc(13, 47), 10).start, [sweep]);
 });
 
-test("every time wrangler.toml fires at starts or checks exactly one job", () => {
-  for (const cron of tomlCrons()) {
-    for (const time of cronTimes(cron)) {
-      const at = Date.parse(`2026-11-26T${time}:00Z`);
-      const { dispatch, verify } = jobsForFiring(jobs, cron, at);
-      assert.equal(dispatch.length + verify.length, 1, `${time} matches one job`);
-    }
+test("dueAt: the tick 10 minutes after a start checks it, since the start's time", () => {
+  assert.deepEqual(dueAt(table, utc(6, 27), 10), { time: "06:27", start: [], check: [{ row: triage, since: new Date(utc(6, 17)) }] });
+  assert.deepEqual(dueAt(table, utc(7, 27), 10).check, [{ row: dev, since: new Date(utc(7, 17)) }]);
+  assert.deepEqual(dueAt(table, utc(1, 57), 10).check, [{ row: sweep, since: new Date(utc(1, 47)) }]);
+  assert.deepEqual(dueAt(table, utc(13, 57), 10).check, [{ row: sweep, since: new Date(utc(13, 47)) }]);
+});
+
+test("dueAt: most ticks have nothing due", () => {
+  for (const [h, m] of [[0, 17], [6, 7], [6, 37], [7, 7], [7, 37], [12, 17], [13, 37], [14, 7]]) {
+    const due = dueAt(table, utc(h, m), 10);
+    assert.deepEqual([due.start, due.check], [[], []], `${h}:${m}`);
   }
-  const at = (t) => jobsForFiring(jobs, "17,27 6,7 * * *", Date.parse(`2026-11-26T${t}:00Z`));
-  assert.equal(at("06:17").dispatch[0].workflow, "agent-backlog.yml");
-  assert.equal(at("06:27").verify[0].workflow, "agent-backlog.yml");
-  assert.equal(at("07:17").dispatch[0].workflow, "agent-dev.yml");
-  assert.equal(at("07:27").verify[0].workflow, "agent-dev.yml");
 });
 
-test("cronTimes: lists, ranges, steps; anything but a daily cron is refused", () => {
-  assert.deepEqual(cronTimes("17 6 * * *"), ["06:17"]);
-  assert.deepEqual(cronTimes("43,53 1,13 * * *"), ["01:43", "01:53", "13:43", "13:53"]);
-  assert.deepEqual(cronTimes("0 9-11 * * *"), ["09:00", "10:00", "11:00"]);
-  assert.deepEqual(cronTimes("0 */8 * * *"), ["00:00", "08:00", "16:00"]);
-  assert.deepEqual(cronTimes("*/30 5 * * *"), ["05:00", "05:30"]);
-  assert.throws(() => cronTimes("0 9 * * MON"), /only daily/);
-  assert.throws(() => cronTimes("0 9 1 * *"), /only daily/);
-  assert.throws(() => cronTimes("0 9 * *"), /five fields/);
-  assert.throws(() => cronTimes("61 9 * * *"), /out of range/);
-  assert.throws(() => cronTimes("x 9 * * *"), /cannot read/);
+test("dueAt: a start at 23:57 is checked on the 00:07 tick of the next day", () => {
+  assert.deepEqual(dueAt(table, utc(23, 57, 26), 10), { time: "23:57", start: [late], check: [] });
+  assert.deepEqual(dueAt(table, utc(0, 7, 27), 10), { time: "00:07", start: [], check: [{ row: late, since: new Date(utc(23, 57, 26)) }] });
 });
 
-test("the config: every job has what a start needs, and no cron is used twice", () => {
-  const seen = new Set();
-  for (const j of jobs) {
-    assert.match(j.repo, /^[\w.-]+\/[\w.-]+$/);
-    assert.match(j.workflow, /^[\w.-]+\.ya?ml$/);
-    for (const c of [j.cron, j.verifyCron]) {
-      assert.equal(normalizeCron(c).split(" ").length, 5, `${c} has five fields`);
-      assert.ok(!seen.has(normalizeCron(c)), `${c} is used once`);
-      seen.add(normalizeCron(c));
-    }
-  }
-  assert.ok(VERIFY_WINDOW_MINUTES >= 10);
+test("dueAt: a start at 00:07 runs on the midnight-hour tick and is checked at 00:17", () => {
+  const first = { at: ["00:07"], repo: "o/r", workflow: "x.yml", body: { ref: "main" } };
+  assert.deepEqual(dueAt([first], utc(0, 7, 27), 10), { time: "00:07", start: [first], check: [] });
+  assert.deepEqual(dueAt([first], utc(0, 17, 27), 10).check, [{ row: first, since: new Date(utc(0, 7, 27)) }]);
+  assert.deepEqual(dueAt([first], utc(23, 57, 26), 10), { time: "23:57", start: [], check: [] });
+});
+
+test("dueAt: one tick can start one row and check another", () => {
+  const a = { at: ["06:17"], repo: "o/r", workflow: "a.yml", body: {} };
+  const b = { at: ["06:27"], repo: "o/r", workflow: "b.yml", body: {} };
+  assert.deepEqual(dueAt([a, b], utc(6, 27), 10), { time: "06:27", start: [b], check: [{ row: a, since: new Date(utc(6, 17)) }] });
+});
+
+test("dueAt: the time comes from the tick, seconds and all, not from the clock", () => {
+  assert.equal(tickTime(Date.UTC(2026, 10, 26, 6, 17, 42)), "06:17");
+  assert.deepEqual(dueAt(table, Date.UTC(2031, 0, 1, 6, 17, 0), 10).start, [triage]);
+});
+
+// ---- the real table and wrangler.toml ----
+
+test("config: the table is the agreed schedule", () => {
+  const rows = schedule.map((r) => [r.at.join(","), r.repo, r.workflow, JSON.stringify(r.body)]);
+  assert.deepEqual(rows, [
+    ["06:17", "tonhe/viaduct", "agent-backlog.yml", '{"ref":"main"}'],
+    ["07:17", "tonhe/viaduct", "agent-dev.yml", '{"ref":"main","inputs":{"mode":"scheduled"}}'],
+    ["01:47,13:47", "tonhe/viaduct", "agent-followup.yml", '{"ref":"main"}'],
+  ]);
+  assert.equal(CHECK_AFTER_MINUTES, 10);
+  assert.equal(TOKEN_CHECK_AT, "06:17");
   assert.equal(TOKEN_WARN_DAYS, 14);
 });
 
-test("the config: the dev job asks for the nightly selection, after triage", () => {
-  const dev = jobs.find((j) => j.workflow === "agent-dev.yml");
-  const triage = jobs.find((j) => j.workflow === "agent-backlog.yml");
-  assert.deepEqual(dev.inputs, { mode: "scheduled" });
-  assert.equal(triage.cron, "17 6 * * *");
-  assert.equal(dev.cron, "17 7 * * *");
-  assert.equal(jobs.find((j) => j.workflow === "agent-followup.yml").cron, "43 1,13 * * *");
-  assert.equal(jobs.filter((j) => j.expiryAlert).length, 1);
+test("config: every time is one the trigger fires at, so no row is silently never run", () => {
+  assert.equal(TRIGGER, "7-59/10 * * * *");
+  for (const row of schedule) {
+    assert.match(row.repo, /^[\w.-]+\/[\w.-]+$/);
+    assert.match(row.workflow, /^[\w.-]+\.ya?ml$/);
+    assert.equal(typeof row.body.ref, "string");
+    for (const at of row.at) assert.match(at, /^([01]\d|2[0-3]):[0-5]7$/, `${at} is HH:M7`);
+  }
+  assert.match(TOKEN_CHECK_AT, /^([01]\d|2[0-3]):[0-5]7$/);
+  assert.equal(CHECK_AFTER_MINUTES % 10, 0);
 });
 
-test("jobsForFiring: a job's own cron text names that job whatever the time", () => {
-  const noon = Date.UTC(2026, 10, 26, 12, 0, 0);
-  assert.deepEqual(jobsForFiring(testJobs, "17 7 * * *", noon), { dispatch: [devJob], verify: [] });
-  assert.deepEqual(jobsForFiring(testJobs, " 27  7 * * * ", noon), { dispatch: [], verify: [devJob] });
+test("config: over a whole day every row is started and checked once per listed time", () => {
+  const started = [];
+  const checked = [];
+  for (let h = 0; h < 24; h++) {
+    for (let m = 7; m < 60; m += 10) {
+      const due = dueAt(schedule, utc(h, m), CHECK_AFTER_MINUTES);
+      for (const r of due.start) started.push(`${due.time} ${r.workflow}`);
+      for (const c of due.check) checked.push(`${due.time} ${c.row.workflow}`);
+    }
+  }
+  assert.deepEqual(started, ["01:47 agent-followup.yml", "06:17 agent-backlog.yml", "07:17 agent-dev.yml", "13:47 agent-followup.yml"]);
+  assert.deepEqual(checked, ["01:57 agent-followup.yml", "06:27 agent-backlog.yml", "07:27 agent-dev.yml", "13:57 agent-followup.yml"]);
 });
 
-test("jobsForFiring: a merged cron is matched by the time it fired at", () => {
-  const merged = "17,27 6,7 * * *";
-  const at = (h, m) => Date.UTC(2026, 10, 26, h, m, 0);
-  assert.deepEqual(jobsForFiring(testJobs, merged, at(6, 17)), { dispatch: [triageJob], verify: [] });
-  assert.deepEqual(jobsForFiring(testJobs, merged, at(6, 27)), { dispatch: [], verify: [triageJob] });
-  assert.deepEqual(jobsForFiring(testJobs, merged, at(7, 17)), { dispatch: [devJob], verify: [] });
-  assert.deepEqual(jobsForFiring(testJobs, merged, at(7, 27)), { dispatch: [], verify: [devJob] });
-  assert.deepEqual(jobsForFiring(testJobs, merged, at(8, 17)), { dispatch: [], verify: [] });
+test("wrangler.toml has exactly the one trigger the config names", () => {
+  const toml = readFileSync(fileURLToPath(new URL("../wrangler.toml", import.meta.url)), "utf8");
+  const block = toml.match(/\[triggers\]\s*crons\s*=\s*\[([^\]]*)\]/);
+  assert.ok(block, "wrangler.toml has a [triggers] crons list");
+  assert.deepEqual([...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]), [TRIGGER]);
+  assert.match(toml, /^workers_dev = false$/m);
 });
 
-test("runCron: a merged cron starts the job due at that time", async () => {
-  const f = fakeFetch([["/dispatches", { status: 204 }]]);
-  const r = await run("17,27 6,7 * * *", f);
-  assert.deepEqual(r, { started: ["o/r agent-dev.yml"], checked: [], problems: [] });
-});
+// ---- talking to GitHub ----
 
-test("dispatchJob: posts ref and inputs with the token, 204 is success", async () => {
+test("startRow: posts the row's body with the token; 204 is success", async () => {
   const f = fakeFetch([["/dispatches", { status: 204, headers: { "github-authentication-token-expiration": "2027-01-01 00:00:00 UTC" } }]]);
-  const r = await dispatchJob(devJob, { fetch: f, token: "t0ken", api: API });
+  const r = await startRow(dev, { fetch: f, token: "t0ken", api: API });
   assert.deepEqual(r, { ok: true, problem: null, expiryHeader: "2027-01-01 00:00:00 UTC" });
   const c = f.calls[0];
   assert.equal(c.url, `${API}/repos/o/r/actions/workflows/agent-dev.yml/dispatches`);
@@ -153,60 +149,51 @@ test("dispatchJob: posts ref and inputs with the token, 204 is success", async (
   assert.deepEqual(c.body, { ref: "main", inputs: { mode: "scheduled" } });
 });
 
-test("dispatchJob: a job without inputs sends only the ref", async () => {
-  const f = fakeFetch([["/dispatches", { status: 204 }]]);
-  await dispatchJob(triageJob, { fetch: f, token: "t", api: API });
-  assert.deepEqual(f.calls[0].body, { ref: "main" });
-});
-
-test("dispatchJob: anything but 204 is a problem that names the workflow and status", async () => {
+test("startRow: anything but 204 is a problem that names the workflow and status", async () => {
   for (const status of [200, 401, 404, 422, 500]) {
-    const f = fakeFetch([["/dispatches", { status, body: status === 200 ? "{}" : '{"message":"nope"}' }]]);
-    const r = await dispatchJob(devJob, { fetch: f, token: "t", api: API });
+    const f = fakeFetch([["/dispatches", { status, body: '{"message":"nope"}' }]]);
+    const r = await startRow(dev, { fetch: f, token: "t", api: API });
     assert.equal(r.ok, false, `status ${status}`);
-    assert.match(r.problem, new RegExp(`o/r agent-dev\\.yml: GitHub answered ${status}`));
+    assert.match(r.problem, new RegExp(`Could not start o/r agent-dev\\.yml: GitHub answered ${status}`));
   }
 });
 
-test("dispatchJob: a network error is a problem, not a throw", async () => {
+test("startRow: a network error is a problem, not a throw", async () => {
   const f = fakeFetch([["/dispatches", new Error("connection reset")]]);
-  const r = await dispatchJob(devJob, { fetch: f, token: "t", api: API });
+  const r = await startRow(dev, { fetch: f, token: "t", api: API });
   assert.equal(r.ok, false);
   assert.match(r.problem, /connection reset/);
 });
 
-test("verifyJob: asks for manually started runs since the given time", async () => {
+test("checkRow: asks for manually started runs created since the start time", async () => {
   const f = fakeFetch([["/runs", { status: 200, body: '{"total_count":1,"workflow_runs":[{}]}' }]]);
-  const r = await verifyJob(devJob, new Date(Date.UTC(2026, 10, 26, 7, 15, 0)), { fetch: f, token: "t0ken", api: API });
-  assert.deepEqual(r, { ok: true, problem: null });
+  const r = await checkRow(dev, new Date(utc(7, 17)), { fetch: f, token: "t0ken", api: API });
+  assert.equal(r.ok, true);
   const u = new URL(f.calls[0].url);
   assert.equal(u.pathname, "/repos/o/r/actions/workflows/agent-dev.yml/runs");
   assert.equal(u.searchParams.get("event"), "workflow_dispatch");
-  assert.equal(u.searchParams.get("created"), ">=2026-11-26T07:15:00Z");
+  assert.equal(u.searchParams.get("created"), ">=2026-11-26T07:17:00Z");
   assert.equal(f.calls[0].init.headers.Authorization, "Bearer t0ken");
 });
 
-test("verifyJob: no run since then is a problem", async () => {
+test("checkRow: no run since then is a problem", async () => {
   const f = fakeFetch([["/runs", { status: 200, body: '{"total_count":0,"workflow_runs":[]}' }]]);
-  const r = await verifyJob(devJob, new Date(NOW), { fetch: f, token: "t", api: API });
+  const r = await checkRow(dev, new Date(utc(7, 17)), { fetch: f, token: "t", api: API });
   assert.equal(r.ok, false);
-  assert.match(r.problem, /o\/r agent-dev\.yml was started but no run exists since 2026-11-26T07:17:00Z/);
+  assert.match(r.problem, /o\/r agent-dev\.yml should have started at 2026-11-26T07:17:00Z, but no run has been created since/);
 });
 
-test("verifyJob: a failed or unreadable answer is a problem, never a pass", async () => {
-  const cases = [
-    { status: 403, body: '{"message":"forbidden"}' },
-    { status: 200, body: "not json" },
-    { status: 200, body: "{}" },
-    new Error("timeout"),
-  ];
-  for (const answer of cases) {
+test("checkRow: a failed or unreadable answer is a problem, never a pass", async () => {
+  const answers = [{ status: 403, body: '{"message":"forbidden"}' }, { status: 200, body: "not json" }, { status: 200, body: "{}" }, new Error("timeout")];
+  for (const answer of answers) {
     const f = fakeFetch([["/runs", answer]]);
-    const r = await verifyJob(devJob, new Date(NOW), { fetch: f, token: "t", api: API });
+    const r = await checkRow(dev, new Date(utc(7, 17)), { fetch: f, token: "t", api: API });
     assert.equal(r.ok, false);
     assert.match(r.problem, /Could not check o\/r agent-dev\.yml/);
   }
 });
+
+// ---- token expiry ----
 
 test("parseTokenExpiry: GitHub's formats, and nothing for junk", () => {
   assert.equal(parseTokenExpiry("2026-12-25 09:00:00 UTC").toISOString(), "2026-12-25T09:00:00.000Z");
@@ -218,16 +205,19 @@ test("parseTokenExpiry: GitHub's formats, and nothing for junk", () => {
 });
 
 test("tokenExpiryWarning: warns under 14 days, silent at 14 or with no header", () => {
-  const now = new Date(NOW);
-  const at = (ms) => new Date(NOW + ms).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const base = utc(6, 17);
+  const now = new Date(base);
   const day = 24 * 60 * 60 * 1000;
+  const at = (ms) => new Date(base + ms).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
   assert.equal(tokenExpiryWarning(null, now, 14), null);
   assert.equal(tokenExpiryWarning(at(14 * day), now, 14), null);
-  assert.equal(tokenExpiryWarning(at(30 * day), now, 14), null);
+  assert.equal(tokenExpiryWarning(at(300 * day), now, 14), null);
   assert.match(tokenExpiryWarning(at(14 * day - 1000), now, 14), /expires on 2026-12-10 \(13 days left\)/);
   assert.match(tokenExpiryWarning(at(1.5 * day), now, 14), /\(1 day left\)/);
   assert.match(tokenExpiryWarning(at(-day), now, 14), /expired on 2026-11-25/);
 });
+
+// ---- Discord ----
 
 test("alertDiscord: nothing to say, nothing sent", async () => {
   const f = fakeFetch([]);
@@ -245,17 +235,26 @@ test("alertDiscord: one message with every problem; a refusal throws", async () 
   await assert.rejects(alertDiscord(["first"], { fetch: f, webhook: undefined }), /No DISCORD_WEBHOOK_URL.*first/);
 });
 
-test("runCron: the start cron starts its job and stays quiet on 204", async () => {
+// ---- a whole tick ----
+
+test("runTick: a tick with nothing due makes no request at all", async () => {
+  const f = fakeFetch([]);
+  const r = await tick(utc(9, 37), f);
+  assert.deepEqual(r, { time: "09:37", started: [], checked: [], problems: [] });
+  assert.equal(f.calls.length, 0);
+});
+
+test("runTick: the 07:17 tick starts dev and is quiet on 204", async () => {
   const f = fakeFetch([["/dispatches", { status: 204 }]]);
-  const r = await run("17 7 * * *", f);
-  assert.deepEqual(r, { started: ["o/r agent-dev.yml"], checked: [], problems: [] });
+  const r = await tick(utc(7, 17), f);
+  assert.deepEqual(r, { time: "07:17", started: ["o/r agent-dev.yml"], checked: [], problems: [] });
   assert.equal(f.calls.length, 1);
   assert.match(f.calls[0].url, /agent-dev\.yml\/dispatches$/);
 });
 
-test("runCron: a refused start goes to Discord", async () => {
+test("runTick: a refused start goes to Discord, without the token", async () => {
   const f = fakeFetch([["/dispatches", { status: 401, body: '{"message":"Bad credentials"}' }], [HOOK, { status: 204 }]]);
-  const r = await run("17 7 * * *", f);
+  const r = await tick(utc(7, 17), f);
   assert.deepEqual(r.started, []);
   assert.equal(r.problems.length, 1);
   const hook = f.calls.find((c) => c.url === HOOK);
@@ -263,49 +262,64 @@ test("runCron: a refused start goes to Discord", async () => {
   assert.doesNotMatch(hook.body.content, /t0ken/);
 });
 
-test("runCron: the check cron looks back over the window and alerts when no run exists", async () => {
+test("runTick: the 07:27 tick checks dev since 07:17 and alerts when no run exists", async () => {
   const f = fakeFetch([["/runs", { status: 200, body: '{"total_count":0}' }], [HOOK, { status: 204 }]]);
-  const r = await run("27 7 * * *", f);
+  const r = await tick(utc(7, 27), f);
   assert.deepEqual(r.checked, []);
-  const u = new URL(f.calls[0].url);
-  assert.equal(u.searchParams.get("created"), ">=2026-11-26T07:05:00Z");
-  assert.match(f.calls.find((c) => c.url === HOOK).body.content, /no run exists/);
+  assert.equal(new URL(f.calls[0].url).searchParams.get("created"), ">=2026-11-26T07:17:00Z");
+  assert.match(f.calls.find((c) => c.url === HOOK).body.content, /no run has been created since/);
 });
 
-test("runCron: the check cron is quiet when the run exists", async () => {
+test("runTick: the check is quiet when the run exists", async () => {
   const f = fakeFetch([["/runs", { status: 200, body: '{"total_count":1}' }]]);
-  const r = await run("27 7 * * *", f);
-  assert.deepEqual(r, { started: [], checked: ["o/r agent-dev.yml"], problems: [] });
+  const r = await tick(utc(7, 27), f);
+  assert.deepEqual(r, { time: "07:27", started: [], checked: ["o/r agent-dev.yml"], problems: [] });
   assert.equal(f.calls.length, 1);
 });
 
-test("runCron: the token warning comes only from the job marked for it", async () => {
+test("runTick: the 00:07 tick checks last night's 23:57 start in the other repo", async () => {
+  const f = fakeFetch([["/repos/o/two/actions/workflows/nightly.yml/runs", { status: 200, body: '{"total_count":1}' }]]);
+  const r = await tick(utc(0, 7, 27), f);
+  assert.deepEqual(r.checked, ["o/two nightly.yml"]);
+  assert.equal(new URL(f.calls[0].url).searchParams.get("created"), ">=2026-11-26T23:57:00Z");
+});
+
+test("runTick: the token warning is sent on the 06:17 tick only", async () => {
   const soon = { "github-authentication-token-expiration": "2026-12-01 00:00:00 UTC" };
   const f = fakeFetch([["/dispatches", { status: 204, headers: soon }], [HOOK, { status: 204 }]]);
-  const dev = await run("17 7 * * *", f);
-  assert.deepEqual(dev.problems, []);
-  const triage = await run("17 6 * * *", f);
-  assert.deepEqual(triage.started, ["o/r agent-backlog.yml"]);
-  assert.equal(triage.problems.length, 1);
-  assert.match(triage.problems[0], /token expires on 2026-12-01 \(4 days left\)/);
+  const other = await tick(utc(7, 17), f);
+  assert.deepEqual(other.problems, []);
+  const daily = await tick(utc(6, 17), f);
+  assert.deepEqual(daily.started, ["o/r agent-backlog.yml"]);
+  assert.equal(daily.problems.length, 1);
+  assert.match(daily.problems[0], /token expires on 2026-12-01 \(4 days left\)/);
+  assert.equal(f.calls.filter((c) => c.url.includes("/rate_limit")).length, 0, "the start's own response is used");
 });
 
-test("runCron: a cron that matches no job is reported", async () => {
-  const f = fakeFetch([[HOOK, { status: 204 }]]);
-  const r = await run("5 5 * * *", f, { scheduledTime: Date.UTC(2026, 10, 26, 5, 5, 0) });
-  assert.match(r.problems[0], /Cron "5 5 \* \* \*" at 05:05 UTC matches no job/);
-  assert.equal(f.calls.length, 1);
+test("runTick: a token with plenty of time left says nothing", async () => {
+  const far = { "github-authentication-token-expiration": "2027-11-01 00:00:00 UTC" };
+  const f = fakeFetch([["/dispatches", { status: 204, headers: far }]]);
+  const r = await tick(utc(6, 17), f);
+  assert.deepEqual(r.problems, []);
 });
 
-test("runCron: a missing token is reported and nothing is sent to GitHub", async () => {
+test("runTick: with no start on the token tick, one extra request reads the header", async () => {
+  const soon = { "github-authentication-token-expiration": "2026-12-01 00:00:00 UTC" };
+  const f = fakeFetch([["/rate_limit", { status: 200, body: "{}", headers: soon }], [HOOK, { status: 204 }]]);
+  const r = await tick(utc(9, 37), f, { tokenCheckAt: "09:37" });
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /token expires on 2026-12-01/);
+});
+
+test("runTick: a missing token is reported and nothing is sent to GitHub", async () => {
   const f = fakeFetch([[HOOK, { status: 204 }]]);
-  const r = await run("17 7 * * *", f, { env: { DISCORD_WEBHOOK_URL: HOOK, GITHUB_API: API } });
+  const r = await tick(utc(7, 17), f, { env: { DISCORD_WEBHOOK_URL: HOOK, GITHUB_API: API } });
   assert.match(r.problems[0], /No GITHUB_TOKEN/);
   assert.deepEqual(f.calls.map((c) => c.url), [HOOK]);
 });
 
-test("runCron: the real GitHub address is the default", async () => {
+test("runTick: the real GitHub address is the default", async () => {
   const f = fakeFetch([["https://api.github.com/repos/o/r/actions/workflows/agent-dev.yml/dispatches", { status: 204 }]]);
-  const r = await run("17 7 * * *", f, { env: { GITHUB_TOKEN: "t", DISCORD_WEBHOOK_URL: HOOK } });
+  const r = await tick(utc(7, 17), f, { env: { GITHUB_TOKEN: "t", DISCORD_WEBHOOK_URL: HOOK } });
   assert.deepEqual(r.started, ["o/r agent-dev.yml"]);
 });

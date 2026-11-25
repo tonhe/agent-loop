@@ -4,63 +4,116 @@ Starts the agent-loop workflows on a schedule from outside GitHub.
 
 GitHub's own `schedule:` trigger is best effort: on a repo it can start runs many hours late or skip them. This Worker runs on Cloudflare's cron and starts each workflow through the GitHub API, the same way `gh workflow run` does. The caller workflows need a `workflow_dispatch` trigger and no `schedule:` block (see `examples/caller/`).
 
-## What it does
+## How it works
 
-| Time (UTC) | Action |
-|---|---|
-| 06:17 | start `agent-backlog.yml` |
-| 06:27 | check that a triage run was created |
-| 07:17 | start `agent-dev.yml` with `mode=scheduled` (the nightly selection) |
-| 07:27 | check that a dev run was created |
-| 01:43 and 13:43 | start `agent-followup.yml` (sweep of every agent PR) |
-| 01:53 and 13:53 | check that a follow-up run was created |
+The Worker has one cron trigger, `7-59/10 * * * *`: a tick at :07, :17, :27, :37, :47 and :57 of every hour. (Cloudflare's free plan allows five cron triggers per account; this uses one.)
 
-Cloudflare's free plan allows five cron triggers per account. `wrangler.toml` therefore merges these eight times into two triggers (`17,27 6,7 * * *` and `43,53 1,13 * * *`), and the Worker picks the job by the time of day it fired at.
+What happens at which tick is a table in `src/config.js`. Times are UTC:
 
-It posts to Discord when:
+| Time | Start | Body sent to GitHub |
+|---|---|---|
+| 06:17 | `agent-backlog.yml` | `{"ref":"main"}` |
+| 07:17 | `agent-dev.yml` | `{"ref":"main","inputs":{"mode":"scheduled"}}` |
+| 01:47 and 13:47 | `agent-followup.yml` | `{"ref":"main"}` |
 
-- GitHub does not answer a start with 204;
-- the check, about 10 minutes later, finds no manually started run of that workflow created in the last 12 minutes;
-- the check itself fails;
-- the GitHub token expires in less than 14 days (reported once a day, with the triage start);
-- a cron fires that matches no job, or the token secret is missing.
+On every tick the Worker takes the time from the tick itself (the event's `scheduledTime`, not the clock) and:
 
-A night with no message means everything started. If Discord itself refuses the message, the invocation fails and shows as an error in the Worker's logs in the Cloudflare dashboard.
+1. Starts every row whose time equals the tick. Most ticks start nothing and make no request.
+2. Posts to Discord if GitHub does not answer a start with 204.
+3. Checks every row that was due 10 minutes earlier: it lists that workflow's manually started runs created since the start time, and posts to Discord if there are none. So the checks happen at 06:27, 07:27, 01:57 and 13:57. Nothing is stored between ticks; the check is worked out from the same table.
+4. On the 06:17 tick, reads the `github-authentication-token-expiration` header from GitHub's response and posts to Discord if the token has fewer than 14 days left.
 
-Times are UTC, so the Eastern times move by an hour with daylight saving: 1:17 and 2:17 AM in winter, 2:17 and 3:17 AM in summer.
+There are no retries. If a tick is skipped, the next tick's check finds no run and alerts.
+
+A night with no message means everything started. If Discord itself refuses a message, the invocation fails and shows as an error in the Worker's logs in the Cloudflare dashboard.
+
+The Eastern times move by an hour with daylight saving: triage and dev are 1:17 and 2:17 AM in winter, 2:17 and 3:17 AM in summer.
 
 ## Files
 
-- `src/config.js`: the list of repos, workflows and crons. Edit this to add a repo or change a time. Each job has its own `cron` (start) and `verifyCron` (check); only daily crons are supported.
-- `wrangler.toml`: the Worker's settings. Its merged `crons` must fire at exactly the times the config uses; `npm test` fails if they differ.
+- `src/config.js`: the schedule table. Each row names its repo, so another repo is more rows. Every time must end in 7 (a tick).
+- `wrangler.toml`: the Worker's settings and its one trigger.
 - `src/core.js`: the logic. `src/index.js`: the Cloudflare entry point.
 - `test/`: `npm test` (Node 20 or later, no dependencies, no network).
+- `tick.sh`: fires one tick of a locally running Worker, for testing.
 
 ## Setup
 
-You need a Cloudflare account, Node, and a GitHub account with admin access to the repo.
+You need a Cloudflare account, Node, and the GitHub account that owns the repo.
 
 ### 1. Create the GitHub token
 
 GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.
 
-- Resource owner: the repo's owner.
-- Repository access: "Only select repositories", and pick only the repo in `src/config.js`.
-- Repository permissions: "Actions: Read and write". Nothing else. ("Metadata: Read-only" is added by GitHub and is fine.)
-- Expiration: up to one year. The Worker warns 14 days before it runs out.
+- Resource owner: `tonhe`.
+- Expiration: custom, one year from today (the longest allowed).
+- Repository access: "Only select repositories" → `tonhe/viaduct` only.
+- Repository permissions: "Actions" → "Read and write". Nothing else. GitHub adds "Metadata: Read-only" by itself; leave it.
+
+Copy the token (`github_pat_...`); it is shown once.
 
 This token can start, cancel and re-run workflows and read their runs and logs in that one repo. It cannot read or change code, issues or secrets.
 
-### 2. Get a Discord webhook URL
+### 2. Get the Discord webhook URL
 
-Use the same webhook as the loop's `DISCORD_WEBHOOK_URL`, or create another in the channel's settings (Integrations → Webhooks).
+Use the webhook the loop already posts to (the repo's `DISCORD_WEBHOOK_URL` secret), or make another: channel settings → Integrations → Webhooks → New Webhook → Copy Webhook URL.
 
-### 3. Deploy
+### 3. Test locally, one entry at a time
 
-From this directory:
+This runs the Worker on your machine with the real token, so every start below creates a real workflow run.
+
+In this directory, create a file named `.dev.vars` (it is in `.gitignore`):
+
+```
+GITHUB_TOKEN=github_pat_...
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+```
+
+Terminal 1:
 
 ```sh
 npm test
+npx wrangler dev --test-scheduled
+```
+
+Terminal 2, once terminal 1 says `Ready on http://localhost:8787`. Each line fires one tick; a start, then its check:
+
+```sh
+./tick.sh 06:17    # starts agent-backlog (and reads the token's expiry)
+./tick.sh 06:27    # checks it
+
+./tick.sh 01:47    # starts agent-followup
+./tick.sh 01:57    # checks it
+
+./tick.sh 07:17    # starts agent-dev, mode=scheduled
+./tick.sh 07:27    # checks it
+```
+
+`tick.sh` gives the tick the most recent moment that time of day occurred, so a check looks back from a real time. Each call answers `{"outcome":"ok","noRetry":false}`, and terminal 1 prints what the tick did, for example:
+
+```
+{"time":"06:17","started":["tonhe/viaduct agent-backlog.yml"],"checked":[],"problems":[]}
+{"time":"06:27","started":[],"checked":["tonhe/viaduct agent-backlog.yml"],"problems":[]}
+```
+
+A start must list the workflow under `started`, its check under `checked`, and `problems` must be empty. Anything in `problems` is also posted to Discord.
+
+Two things to know:
+
+- The dev start is the real nightly run: it selects and works up to `max_issues` ready issues. Do it last, when you want that to happen.
+- A local check can pass on an older run, because it counts every manually started run since that time of day last occurred. So also confirm on GitHub that each workflow has a run created in the last few minutes:
+
+```sh
+gh run list -R tonhe/viaduct --event workflow_dispatch --limit 6
+```
+
+To see an alert arrive in Discord, fire a tick that checks something not started: `./tick.sh 13:57` alerts if no follow-up run was created since the last 13:47 UTC.
+
+When done, stop terminal 1 with Ctrl-C and delete `.dev.vars`.
+
+### 4. Deploy
+
+```sh
 npx wrangler login
 npx wrangler deploy
 npx wrangler secret put GITHUB_TOKEN
@@ -69,56 +122,22 @@ npx wrangler secret put DISCORD_WEBHOOK_URL
 
 `wrangler secret put` asks for the value and stores it encrypted; it is never written to a file. Deploy first: a secret needs the Worker to exist.
 
-The Worker has no web address (`workers_dev = false`); it only runs on its crons.
+`wrangler deploy` should print the schedule `7-59/10 * * * *`. The Worker has no web address (`workers_dev = false`); it only runs on its cron.
 
-### 4. Test each cron once
+### 5. The first night
 
-This runs the Worker on your machine with the real token, so each step starts a real workflow run.
-
-Put the two secrets in a file named `.dev.vars` in this directory. It is listed in `.gitignore`; delete it when you are done.
-
-```
-GITHUB_TOKEN=github_pat_...
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
-```
-
-Start the Worker locally:
+The deployed Worker is proven by its first real ticks: no Discord message, and new runs at 06:17 and 07:17 UTC:
 
 ```sh
-npx wrangler dev --test-scheduled
+gh run list -R tonhe/viaduct --event workflow_dispatch --limit 6
 ```
 
-In a second terminal, fire each job's start, then its check. Use the job's own cron from `src/config.js` (not the merged one in `wrangler.toml`): that names the job directly, whatever the time is now. The spaces in a cron are written as `+`:
-
-```sh
-curl "http://localhost:8787/__scheduled?cron=17+6+*+*+*"       # start triage
-curl "http://localhost:8787/__scheduled?cron=27+6+*+*+*"       # check it
-
-curl "http://localhost:8787/__scheduled?cron=17+7+*+*+*"       # start dev
-curl "http://localhost:8787/__scheduled?cron=27+7+*+*+*"       # check it
-
-curl "http://localhost:8787/__scheduled?cron=43+1,13+*+*+*"    # start follow-up
-curl "http://localhost:8787/__scheduled?cron=53+1,13+*+*+*"    # check it
-```
-
-Each `curl` answers `Ran scheduled event`. After each one the first terminal prints a line such as `{"cron":"17 6 * * *","started":["tonhe/viaduct agent-backlog.yml"],"checked":[],"problems":[]}`. A start should list the workflow under `started`, its check under `checked`, and `problems` should be empty.
-
-Note on the dev start: `mode=scheduled` really selects and works up to `max_issues` ready issues. Run it when you want that to happen.
-
-Then confirm on GitHub that a run exists for each workflow:
-
-```sh
-gh run list -R tonhe/viaduct --event workflow_dispatch --limit 5
-```
-
-To see an alert arrive, fire a check with nothing started in the last 12 minutes; Discord should get "was started but no run exists".
-
-The deployed crons themselves are proven by the first night: no Discord message, and three new runs in the list above.
+The Worker's own log (Cloudflare dashboard → Workers → `agent-loop-trigger` → Logs) has one line for each tick that did something.
 
 ## Renewing the token
 
 When the warning arrives, create a new token as in step 1 and run `npx wrangler secret put GITHUB_TOKEN` again. Nothing else changes.
 
-## Adding a repo
+## Changing the schedule or adding a repo
 
-Add its jobs to `src/config.js`, make the crons in `wrangler.toml` fire at the new times as well, give the token access to that repo, run `npm test`, and deploy. Two jobs may share a time. Keep `wrangler.toml` at five crons or fewer on the free plan (the limit is per account, across all your Workers); a test checks this.
+Edit the table in `src/config.js`, run `npm test`, and `npx wrangler deploy`. Times must end in 7. For another repo, add rows naming it and give the token access to that repo too. `wrangler.toml` does not change.
