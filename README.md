@@ -32,6 +32,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | A plan proposal can only name the owner's issues it was offered; model text is cut to single lines and defanged | `lib/planning.jq` (`plan_due`, `plan_body`) |
 | Release and Plan issues are never triaged or worked (their text is not yours) | `lib/meta.jq`, used by `lib/candidates.jq`, `lib/select.jq`, `select-issues.sh` |
 | An agent PR touching a protected-by-instruction path needs your "Owner decision" comment on the issue | `review-protected.sh`, `lib/glob.jq` block without the model; the reviewer judges scope when a decision exists |
+| The model cannot choose which issue a PR is reviewed against | `review-gate.sh` takes the number from the head branch (`issue-N`, set by `publish-pr.sh`) and fails the check unless the body marker agrees; `publish-pr.sh` neutralises `agent-loop issue=` and HTML comments in the model's PR text; `issue-context.sh` refuses Release and Plan issues |
 | No network tools, no MCP, narrow Bash allowlist | `run-claude.sh` (`--tools`, `--allowedTools`, `--strict-mcp-config`, `--permission-mode dontAsk`) |
 | Token limits | `--max-turns`, wall-clock `timeout`, job `timeout-minutes`, max issues per run, model per job |
 | Agent can't touch CI, Makefile, coverage floors | `check-diff.sh` (`.github/` always, plus `protected_paths`); PAT lacks Workflows permission |
@@ -214,7 +215,7 @@ Pattern syntax (`lib/glob.jq`), one per line, blank lines and `#` comments ignor
 
 Patterns are anchored at the repository root, match the whole path and are case-sensitive; a leading `./` or `/` is dropped. There are no `[classes]`, `{a,b}` or `!` negation. Renames count on both sides, so moving a file out of a protected directory is a change to it. A file name containing a quote, a backslash or a control character counts as protected.
 
-The check applies to agent PRs only (opened by you, carrying the `agent-loop issue=N` marker, not from a fork). Your own PRs and fork PRs pass straight through the review workflow as before. An empty `protected_review_paths` turns the feature off and nothing changes.
+The check applies to agent PRs only: opened by you, not from a fork, on a head branch named `issue-N`, with the `agent-loop issue=N` marker in the body. The issue is the `N` of the branch name, which `publish-pr.sh` sets; the body is partly model text, so it is only checked for agreement (`scripts/review-gate.sh`). If the two disagree, or only one of them is there (an `issue-N` branch without the marker, a marker on another branch, a second marker naming another issue), the `agent-review` check fails rather than guessing. So do not name your own branches `issue-N`. Your other PRs and fork PRs pass straight through the review workflow as before. An empty `protected_review_paths` turns the feature off and nothing changes.
 
 ## Adapting to another language
 

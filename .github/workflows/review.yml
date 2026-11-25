@@ -24,33 +24,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      # The scripts are loaded first so the gate below is the tested one (scripts/review-gate.sh).
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+
+      - name: Load agent-loop scripts outside the workspace
+        run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
+
+      # The issue number comes from the head branch name (publish-pr.sh pushes issue-N),
+      # not from the PR body, whose first part the model wrote. The body marker has to
+      # agree, or the check fails. PR text reaches the script through env only.
       - name: Is this an agent PR?
         id: gate
         env:
           BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           OWNER_LOGIN: ${{ inputs.owner_login }}
-        run: |
-          n=$(grep -oE 'agent-loop issue=[0-9]+' <<<"$BODY" | head -1 | grep -oE '[0-9]+' || true)
-          if [[ "$FORK" == "true" || -z "$n" || "$AUTHOR" != "$OWNER_LOGIN" ]]; then
-            echo "Not an agent PR; nothing to review here."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"; echo "issue=$n" >> "$GITHUB_OUTPUT"
-          fi
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/review-gate.sh"
 
       - if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with: {ref: "${{ github.event.pull_request.head.sha }}", persist-credentials: false, fetch-depth: 0}
-
-      - if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@v4
-        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
-
-      - name: Load agent-loop scripts outside the workspace
-        if: steps.gate.outputs.run == 'true'
-        run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
 
       # Deterministic part of the protected-by-instruction check (scripts/review-protected.sh):
       # protected files changed and no "Owner decision" comment from the owner on the issue

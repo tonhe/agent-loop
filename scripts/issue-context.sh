@@ -3,6 +3,7 @@
 # Other people's comments are dropped so they cannot steer the agent.
 # Usage: issue-context.sh ISSUE_NUMBER      Env: GH_TOKEN, GITHUB_REPOSITORY, OWNER_LOGIN
 set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
 n=$1
 
 issue=$(gh issue view "$n" -R "$GITHUB_REPOSITORY" --json number,title,body,author,labels,comments)
@@ -10,6 +11,12 @@ issue=$(gh issue view "$n" -R "$GITHUB_REPOSITORY" --json number,title,body,auth
 author=$(jq -r '.author.login' <<<"$issue")
 if [[ "$author" != "$OWNER_LOGIN" ]]; then
   echo "::error::Issue #$n was opened by $author, not $OWNER_LOGIN. Refusing." >&2
+  exit 1
+fi
+# A Release or Plan issue is filed as the owner but its body is commit text or model
+# text (lib/meta.jq). It is never context for a dev, fix or review prompt.
+if [[ $(jq -r -L "$here/lib" 'include "meta"; is_meta_issue' <<<"$issue") != false ]]; then
+  echo "::error::Issue #$n is a Release or Plan issue filed by the loop. Refusing to use it as prompt context." >&2
   exit 1
 fi
 
