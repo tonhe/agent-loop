@@ -58,8 +58,9 @@ for p in CLAUDE.md sub/dir/CLAUDE.md RELEASING.md .claude/settings.json .claude-
 done
 check "gate: docs/RELEASING.md and a file called CLAUDE.mdx are not process" "true" "$(mgc '.files += ["docs/RELEASING.md", "CLAUDE.mdx", "notes/claude.md"]')"
 check "gate: the old side of a rename counts (moving out of .github/)" "false" "$(mgc '.files += [".github/x.sh", "scripts/x.sh"]')"
-# Owner approvals (Owner decision, live-check answer) as they will work once agents have
-# their own identity (tonhe/agent-loop#35); until then merge-gate.sh never sets this.
+# Owner approvals (Owner decision, live-check answer) as they would work if agents had
+# their own GitHub identity. They don't (tonhe/agent-loop#35, closed as not planned), so
+# merge-gate.sh never sets this; the rules stay tested in case that is ever reversed.
 tr='.owner_approvals_trusted = true'
 check "gate (approvals trusted): protected_review_paths without an Owner decision refuses" \
   '"internal/sysprobe/a.go" (protected_review_paths internal/sysprobe/**) and issue #36 has no Owner decision comment' \
@@ -71,8 +72,9 @@ check "gate (approvals trusted): an Owner decision by someone else does not coun
 check "gate (approvals trusted): an Owner decision carrying a loop marker does not count" "false" \
   "$(mgc "$tr | .files += [\"internal/sysprobe/a.go\"] | .issue.comments = [{author: {login: \"tonhe\"}, body: \"Owner decision: x\n<!-- agent-dev -->\"}]")"
 
-# Interim (until tonhe/agent-loop#35): no owner approval is trusted, so the gate merges
-# only PRs that need none, and refuses every other one with "needs owner merge".
+# The owner-merge rule (permanent): agents act as the owner, so no owner approval is
+# trusted. The gate merges only PRs that need none and refuses every other one with
+# "needs owner merge".
 check "gate: the default does not trust owner approvals" "false" "$(jq -r '.owner_approvals_trusted // false' <<<"$mg_ok")"
 check "gate: protected_review_paths WITH an Owner decision refuses: needs owner merge" "false|1" \
   "$(mgc '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "tonhe"}, body: "Owner decision: sysprobe may change."}]')|$(mgr '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "tonhe"}, body: "Owner decision: sysprobe may change."}]' | grep -c '^needs owner merge: changes "internal/sysprobe/a.go"')"
@@ -81,11 +83,14 @@ check "gate: protected_review_paths without a decision refuses: needs owner merg
 check "gate: agent:live-check WITH the owner's passed answer refuses: needs owner merge" "false|1" \
   "$(mgc ".pr.labels = [{name: \"agent:live-check\"}] | .pr.comments = [{author: {login: \"tonhe\"}, body: \"Live check passed $sha\"}]")|$(mgr ".pr.labels = [{name: \"agent:live-check\"}] | .pr.comments = [{author: {login: \"tonhe\"}, body: \"Live check passed $sha\"}]" | grep -c '^needs owner merge: labeled agent:live-check')"
 check "gate: a risk:medium issue refuses: needs owner merge" \
-  "needs owner merge: issue #36 is not risk:low (risk:medium); only risk:low PRs are merged by the gate until https://github.com/tonhe/agent-loop/issues/35 is done" \
+  "needs owner merge: issue #36 is not risk:low (risk:medium); the gate merges only risk:low PRs, because agents act as the owner and no owner approval can be verified" \
   "$(mgr '.issue.labels = [{name: "risk:medium"}] | .label_events[0].label = "risk:medium"')"
 check "gate: an issue with no risk label refuses: needs owner merge" "1" "$(mgr '.issue.labels = []' | grep -c '^needs owner merge: issue #36 is not risk:low (no risk label)')"
 check "gate: a protected_paths hit says needs owner merge" "1" "$(mgr '.protected_hits = ["Makefile"]' | grep -c '^needs owner merge: changes protected path "Makefile"')"
 check "gate: risk:low, no protected file, no live check still passes" "true|" "$(mg .)"
+all_owner='.issue.labels = [{name: "risk:medium"}] | .label_events[0].label = "risk:medium" | .files += ["internal/sysprobe/a.go"] | .protected_hits = ["Makefile"] | .pr.labels = [{name: "agent:live-check"}] | .pr_label_events = [{event: "labeled", created_at: "2026-11-20T10:01:00Z", label: "agent:live-check"}]'
+check "gate: every needs-owner-merge reason is permanent (no until, interim, for now or #35)" "4|0" \
+  "$(jq -c "$all_owner" <<<"$mg_ok" | jq -r -L "$root/lib" 'include "merge-gate"; merge_gate | .reasons[]' | grep -c '^needs owner merge')|$(jq -c "$all_owner" <<<"$mg_ok" | jq -r -L "$root/lib" 'include "merge-gate"; merge_gate | .reasons[]' | grep -ciE 'until|interim|for now|issues/35|#35')"
 
 # risk:* label history: a change after the PR was opened leaves it for the owner
 check "gate: risk:low added after the PR was opened refuses: needs owner merge" \
@@ -325,7 +330,7 @@ check "gate.sh: the facts set owner_approvals_trusted to the literal false" "1" 
   "$(grep -cE '^   owner_approvals_trusted: false}'"'"' > "\$work/facts.json"$' "$root/scripts/merge-gate.sh")"
 cp "$mgs/dev.orig" "$mgs/dev.yml"; cp "$mgs/pr.bak" "$mgs/pr.json"
 
-# Interim owner-merge rule end to end: refused, "needs owner merge", nothing enabled.
+# The owner-merge rule end to end: refused, "needs owner merge", nothing enabled.
 jq '.labels = [{name: "risk:medium"}]' "$mgs/issue.bak" > "$mgs/issue.json"
 out=$(mgrun 50); rc=$?
 check "gate.sh: a risk:medium PR is refused as needs owner merge and never merged" "1|1|0" \
@@ -337,6 +342,18 @@ check "gate.sh: a live-check PR with a passed answer is refused as needs owner m
   "$rc|$(grep -c 'needs owner merge: labeled agent:live-check' <<<"$out")|$(grep -c 'pr merge' "$mgs/log")"
 cp "$mgs/pr.bak" "$mgs/pr.json"
 rm -rf "$mgs"
+
+# ---------- the owner-merge rule is permanent: no "until #35" left anywhere ----------
+check "docs: the owner-merge rule is described as permanent (README, skills, gate, publish, labels)" "0" \
+  "$(cat "$root/README.md" "$root"/skills/*/SKILL.md "$root/lib/merge-gate.jq" "$root/scripts/merge-gate.sh" "$root/scripts/sprint-publish.sh" "$root/scripts/bootstrap-labels.sh" | grep -ciE 'until[^.]*(#35|issues/35|identity)|interim|for now|\(for now\)|until agents have')"
+check "sprint-publish.sh: the live-check comment says the owner merges, and that the gate never will" "1|1" \
+  "$(grep -c 'then merge the PR yourself' "$root/scripts/sprint-publish.sh")|$(grep -c 'The merge gate never merges a live-check PR' "$root/scripts/sprint-publish.sh")"
+check "sprint-publish.sh creates agent:live-check with the same description as bootstrap-labels" "1|0" \
+  "$(grep -c -- "--description \"Sprint PR waiting on the owner's live check; the owner merges it by hand\"" "$root/scripts/sprint-publish.sh")|$(grep -ciE 'merge-gate.sh then waits|before the merge gate allows' "$root/scripts/sprint-publish.sh")"
+check "every shell script in the repository parses (bash -n)" "" \
+  "$(cd "$root" && git ls-files '*.sh' | while read -r f; do bash -n "$f" 2>/dev/null || echo "$f"; done)"
+check "bootstrap-labels: agent:live-check says the owner checks and merges it" "1" \
+  "$(grep -c "^agent:live-check|fbca04|Sprint PR waiting on the owner's live check; the owner merges it by hand$" "$root/scripts/bootstrap-labels.sh")"
 
 # ---------- a shared gh stub for the sprint scripts ----------
 # Issues live in $SP/issues/N.json, caller workflows in $SP/dev.yml and $SP/review.yml.

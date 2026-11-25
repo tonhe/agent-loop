@@ -25,12 +25,12 @@ Set once: `S=${CLAUDE_PLUGIN_ROOT}/scripts` and `R=$(gh repo view --json nameWit
 3. **Base.** `B=$(bash $S/sprint-issue.sh base N)`. If it fails, run `bash $S/claim-issue.sh stop N "<the reason it printed>"` and report `stopped`. Otherwise start from the newest base: `git fetch origin "$B" && git switch -c work-N "origin/$B"`.
 4. **Scope check, early.** Once you know which files you will touch, and again before publishing, run `bash $S/scope-check.sh N "$B"`. If `ok` is false:
    - `protected` or `process` files: you may not change them at all. Find another way inside the allowed files. If there is none, stop.
-   - `needs_decision` files: the owner must approve first.
+   - `needs_decision` files: the owner must approve first. With an `Owner decision` you may change them, but the PR is then the owner's to merge: the merge gate never merges a PR that needs the owner's approval (a protected-review file, a live check, an issue that is not `risk:low`), because agents act as the owner and it cannot verify an approval.
    To stop, run `bash $S/claim-issue.sh stop N "Needs an Owner decision: <file> must change because <reason>. Proposed scope: <one line>."` and report `stopped`. Never wait for an answer.
 5. **Tests first.** Write the test that shows the problem or the new behavior. Run it and confirm it FAILS on the current code, and fails for the reason you expect. Keep the failing output for your report.
 6. **Implement.** Make the test pass. Then run the repository's verify command (`jq -r .verify_command` of `bash $S/loop-config.sh`, e.g. `make test-all`) and make it pass. Never weaken, skip or delete an existing assertion to get green. If a golden file changes, say why in the PR body.
 7. **Docs.** If the change is visible to users (flags, output, behavior), update the README or docs in the same PR.
-8. **Live check?** If proving the change needs something only the owner can run (sudo, a live network, real hardware), do everything else and put a `live_check` in the result (step 9). The PR is then labeled `agent:live-check`, and the owner runs the check and merges it. Do not try to run it yourself with elevated rights.
+8. **Live check?** If proving the change needs something only the owner can run (sudo, a live network, real hardware), do everything else and put a `live_check` in the result (step 9). The PR is then labeled `agent:live-check`, and the owner runs the check and merges it by hand. Do not try to run it yourself with elevated rights.
 9. **Publish.** Write `result.json` (outside the worktree, e.g. `$(mktemp -d)/result.json`):
    ```json
    {"status": "done", "summary": "...", "commit_message": "fix(x): ...", "pr_title": "...",

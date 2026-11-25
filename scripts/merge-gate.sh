@@ -11,8 +11,8 @@
 #     commit (pending, missing, skipped, neutral and failed all refuse)
 #   - no file matches protected_paths (git pathspecs, as check-diff.sh) or the loop's
 #     process paths (.github/, .claude/, CLAUDE.md, RELEASING.md, ...)
-#   - needs no owner approval (interim, until https://github.com/tonhe/agent-loop/issues/35:
-#     agents act as the owner, so an owner comment cannot be told from an agent's): the
+#   - needs no owner approval (the owner-merge rule, permanent: agents act as the owner,
+#     so an owner comment cannot be told from an agent's; see lib/merge-gate.jq): the
 #     issue is risk:low, no protected_review_paths file changes (an Owner decision is not
 #     trusted) and the PR is not labeled agent:live-check, and no risk:* label was added
 #     to or removed from the issue after the PR was opened (the issue timeline).
