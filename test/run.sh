@@ -244,6 +244,41 @@ check "review.yml: the gate is the tested script, not an inline first-match grep
   "$(grep -c '^        run: bash "\$RUNNER_TEMP/agent-loop/scripts/review-gate.sh"$' "$rv_yml")|$(grep -c 'head -1' "$rv_yml")"
 check "review.yml: PR body, branch and author never interpolated into a run: block" "0" \
   "$(grep -E 'pull_request\.(body|title|head\.ref|user\.login)' "$rv_yml" | grep -vcE '^          (BODY|HEAD_REF|AUTHOR): ')"
+rv_step() { awk -v n="- name: $1" '/^      - /{on = (index($0, n) > 0)} on' "$rv_yml"; }  # one step of review.yml, by name
+check "review.yml: run steps are single lines that start a script, no inline shell blocks" "0" "$(grep -cE '^[[:space:]]+run: *[|>]' "$rv_yml")"
+check "review.yml: no expression is ever interpolated into a run: line" "0" "$(grep -E '^[[:space:]]+run: ' "$rv_yml" | grep -c '\${{')"
+check "review.yml: every expression sits in an env value, a with: map, the job timeout or continue-on-error" "0" \
+  "$(grep '\${{' "$rv_yml" | grep -v '^[[:space:]]*#' | grep -vcE '^[[:space:]]+([A-Z_]+: \$\{\{ [^}]+ \}\}(/[a-z/.]+)?|with: \{.*\}|timeout-minutes: \$\{\{ inputs\.job_timeout_minutes \}\}|continue-on-error: \$\{\{ steps\.gate\.outputs\.mode == .owner. \}\})$')"
+i=0
+for l in 'owner_login:     {type: string, required: true}' 'platforms:       {type: string, default: "Linux, macOS, and Windows"}' 'verify_command:  {type: string, required: true}' \
+         'model:           {type: string, default: sonnet}' 'max_turns:       {type: number, default: 25}' 'timeout_minutes: {type: number, default: 15}' \
+         'claude_version:  {type: string, default: "2.1.331"}' 'loop_ref:        {type: string, default: main}' 'loop_repo:       {type: string, default: tonhe/agent-loop}'; do
+  i=$((i+1)); check "review.yml: existing input $i is unchanged (callers pinned to v1 keep working)" "1" "$(grep -cF "      $l" "$rv_yml")"
+done
+check "review.yml: protected_review_paths is still an optional string input" "1" "$(grep -c '^      protected_review_paths: {type: string, default: "", ' "$rv_yml")"
+check "review.yml: no new required input or secret" "3" "$(grep -c 'required: true' "$rv_yml")"
+check "review.yml: split inputs and the job timeout, with their defaults" "1|1|1|1|1" \
+  "$(grep -c '^      split_max_files: *{type: number, default: 40, ' "$rv_yml")|$(grep -c '^      split_max_lines: *{type: number, default: 3000, ' "$rv_yml")|$(grep -c '^      split_max_calls: *{type: number, default: 8, ' "$rv_yml")|$(grep -c '^      split_max_diff_bytes: *{type: number, default: 300000, ' "$rv_yml")|$(grep -c '^      job_timeout_minutes: *{type: number, default: 120, ' "$rv_yml")"
+check "review.yml: the job timeout is the input, and the calls are told it" "1|1" \
+  "$(grep -c '^    timeout-minutes: \${{ inputs.job_timeout_minutes }}$' "$rv_yml")|$(rv_step 'Claude reviews' | grep -c '^          JOB_TIMEOUT_MIN: \${{ inputs.job_timeout_minutes }}$')"
+check "review.yml: each call keeps its own timeout" "1" "$(rv_step 'Claude reviews' | grep -c '^          TIMEOUT_MIN: \${{ inputs.timeout_minutes }}$')"
+check "review.yml: every step after the gate takes the mode from the gate's output, through env" "6" "$(grep -c '^          MODE: \${{ steps.gate.outputs.mode }}$' "$rv_yml")"
+check "review.yml: every review step runs under advisory.sh, so an owner PR cannot be failed by it" "5|5" \
+  "$(grep -cE 'scripts/review-(linked|protected|prompts|calls|post)\.sh' <(grep -E '^[[:space:]]+run: ' "$rv_yml"))|$(grep -cE '^        run: bash "\$RUNNER_TEMP/agent-loop/scripts/advisory\.sh" bash "\$RUNNER_TEMP/agent-loop/scripts/review-(linked|protected|prompts|calls|post)\.sh" ' "$rv_yml")"
+check "review.yml: the PR checkout and the Claude install cannot fail an owner PR either" "1|1" \
+  "$(grep -c "^        continue-on-error: \${{ steps.gate.outputs.mode == 'owner' }}\$" "$rv_yml")|$(rv_step 'Install Claude Code' | grep -c '^        run: bash "\$RUNNER_TEMP/agent-loop/scripts/advisory.sh" npm install -g "@anthropic-ai/claude-code@\$CLAUDE_VERSION"$')"
+check "review.yml: the linked-issue step is for owner PRs only" "1" \
+  "$(rv_step 'Linked issues' | grep -c "^        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.mode == 'owner'\$")"
+check "review.yml: the post step also runs after a failed step on an owner PR, but not when cancelled" "1" \
+  "$(rv_step 'Post review' | grep -c "^        if: steps.gate.outputs.run == 'true' && !cancelled() && (success() || steps.gate.outputs.mode == 'owner')\$")"
+check "review.yml: the Claude step holds the Claude token and no GitHub token" "1|0" \
+  "$(rv_step 'Claude reviews' | grep -c '^          CLAUDE_CODE_OAUTH_TOKEN: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}$')|$(rv_step 'Claude reviews' | grep -c 'GH_TOKEN\|github\.token')"
+check "review.yml: no other step holds the Claude token" "1" "$(grep -c 'secrets\.CLAUDE_CODE_OAUTH_TOKEN' "$rv_yml")"
+check "review.yml: the reviewer's tools are still read-only" "1" \
+  "$(rv_step 'Claude reviews' | grep -cF 'ALLOWED_TOOLS: "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"')"
+check "review.yml: split settings reach the script through env" "4" "$(rv_step 'Build review prompt' | grep -cE '^          SPLIT_MAX_(FILES|LINES|CALLS|DIFF_BYTES): \$\{\{ inputs\.split_max_(files|lines|calls|diff_bytes) \}\}$')"
+check "followup: an owner review comment is not what the fix round or the sweep look for" "0|0" \
+  "$(grep -c 'agent-review' "$root/lib/followup.jq")|$(grep -c 'agent-review' "$root/.github/workflows/followup.yml")"
 
 # ---------- owner mode: linked issues (lib/review.jq, review-linked.sh) ----------
 li() { jq -Rsc -L "$root/lib" 'include "review"; linked_issues' <<<"$1"; }
