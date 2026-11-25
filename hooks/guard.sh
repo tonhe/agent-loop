@@ -75,7 +75,10 @@ if grep -qE '(^|[^[:alnum:]_-])gh +' <<<"$flat"; then
   # checks the label history on GitHub, see lib/merge-gate.jq.)
   if grep -qE -- '(--add-label|--remove-label|--label|(^| )-l)( |=)?[^;&|]*(risk:|agent:live-check)' <<<"$norm"; then
     plain_read=false
-    if ! grep -qE '[;&|`]|\$\(' <<<"$norm" && [[ "$cmd" != *$'\n'* ]]; then
+    # Strict: every token made of letters, digits and : / . _ = , - only (quotes are
+    # already gone), so no separator, subshell, process substitution, redirection,
+    # expansion or glob can hide a second command.
+    if [[ "$cmd" != *$'\n'* ]] && ! grep -qE '[^a-z0-9:/._=, -]' <<<"$norm"; then
       read -ra t <<<"$norm"; k=1
       skip() { while [[ "${t[k]:-}" == -r || "${t[k]:-}" == --repo ]]; do k=$((k+2)); done
                while [[ "${t[k]:-}" == --repo=* || "${t[k]:-}" == -r?* ]]; do k=$((k+1)); done; }
@@ -103,8 +106,17 @@ if grep -qE '(^|[^[:alnum:]_-])gh +' <<<"$flat"; then
     apiw=false
     grep -qE -- '(^| )--(field|raw-field|input)([ =]|$)|(^| )-[a-z]*f' <<<"$norm" && apiw=true
     grep -qE '(^| )graphql( |$)' <<<"$norm" && apiw=true
-    while read -r m; do [[ -n "$m" && "$m" != get ]] && apiw=true; done \
-      < <(grep -oE -- '(--method( |=)*|(^| )-[a-z]*x *)[a-z]*' <<<"$norm" | sed -E 's/.*[ =x]//')
+    # Every -X/--method, however written (-X get, -Xget, -X=get, -iXget, --method get,
+    # --method=get), must read exactly "get". One that cannot be read fails closed.
+    read -ra at <<<"$norm"
+    for ((q = 0; q < ${#at[@]}; q++)); do
+      a=${at[q]}; m='unset'
+      if [[ "$a" == --method ]]; then m=${at[q+1]:-}
+      elif [[ "$a" == --method=* ]]; then m=${a#--method=}
+      elif [[ "$a" =~ ^-[a-z]*x(.*)$ ]]; then m=${BASH_REMATCH[1]#=}; [[ -z "$m" ]] && m=${at[q+1]:-}
+      fi
+      [[ "$m" != unset && "$m" != get ]] && apiw=true
+    done
     if grep -qE '`|\$\(' <<<"$flat" || sed -E 's/\$\{?R\}?([^[:alnum:]_]|$)/\1/g' <<<"$flat" | grep -q '\$'; then
       block "gh api with shell expansions (other than \$R) cannot be checked. Write the command out literally."
     fi

@@ -621,6 +621,7 @@ for c in "gh issue edit 36 --add-label risk:low" "gh issue edit 36 --remove-labe
 done
 for c in "gh issue list -R o/r -l risk:low" "gh label list" "gh api repos/o/r/issues/36/timeline --paginate" \
          "gh api -X GET repos/o/r/issues/36" "gh api -XGET repos/o/r/pulls/50 --jq .labels" "gh api --method=get repos/o/r/pulls/50" \
+         "gh api -X=GET repos/o/r/issues/36" "gh api --method GET repos/o/r/pulls/50" \
          "gh api repos/\$R/issues/36/timeline" "gh api \"repos/\${R}/pulls/50/files?per_page=100\" --paginate" \
          "gh issue -R o/r list --label risk:low" "gh issue list --repo=o/r -l risk:low" "gh pr view 50 --json labels"; do
   check "guard: allows: $c" "0" "$(guard Bash "$c")"
@@ -634,7 +635,12 @@ for c in "gh api repos/o/r/issues/36/comments -f body=hi" "gh api graphql -f que
          "gh alias set il 'issue edit'" "gh alias import a.yml" "gh extension install someone/gh-labels" \
          "gh il 36 --add-label risk:low" "gh issue list --label risk:low; gh issue edit 36 --add-label risk:low" \
          "echo 36 | gh issue edit --add-label risk:low" "gh issue list -l risk:low && gh issue edit 36 --add-label agent:ready" \
-         $'gh issue list -l risk:low\ngh issue edit 36 --add-label risk:low'; do
+         $'gh issue list -l risk:low\ngh issue edit 36 --add-label risk:low' \
+         "gh issue list -l risk:low >(gh issue edit 36 --add-label risk:low)" "gh issue list -l risk:low <(gh issue edit 36 --add-label risk:low)" \
+         "gh issue list -l risk:low > \$(gh issue edit 36 --add-label risk:low)" "{ gh issue edit 36 --add-label risk:low; }" \
+         "gh issue list -l risk:low \${x:-\$(gh issue edit 36 --add-label risk:low)}" "gh issue list -l risk:* " \
+         "gh api -X=PATCH repos/o/r/issues/36" "gh api -iX=post repos/o/r/issues/36" "gh api -X" "gh api repos/o/r/pulls/50 --method" \
+         "gh api -X get2 repos/o/r/issues/36" "gh api --method=GET --method=PATCH repos/o/r/issues/36"; do
   check "guard: blocks: $c" "2" "$(guard Bash "$c")"
 done
 for c in "gh issue list --label risk:low" "gh issue edit 36 --add-label agent:in-progress" "gh issue view 36 --json labels --jq '.labels[].name | select(startswith(\"risk:\"))'" \
