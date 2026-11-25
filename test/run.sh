@@ -21,7 +21,8 @@ sel_in='{
   {"number": 8, "createdAt": "2026-01-08T00:00:00Z", "author": {"login": "tonhe"},    "labels": [{"name": "agent:ready"}]},
   {"number": 9, "createdAt": "2026-01-01T00:00:00Z", "author": {"login": "tonhe"},    "labels": []}
  ],
- "prs": [{"number": 100, "body": "Closes #7\n<!-- agent-loop issue=7 -->"}, {"number": 101, "body": null}]
+ "prs": [{"number": 100, "headRefName": "issue-7", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": "Closes #7\n<!-- agent-loop issue=7 -->"},
+         {"number": 101, "headRefName": "feat/x", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": null}]
 }'
 check "select: owner-only, skips in-progress/needs-human/open-PR, oldest first, max 3" \
   "[2,5,8]" "$(jq -c --arg owner tonhe --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
@@ -29,6 +30,58 @@ check "select: max respected" \
   "[2]" "$(jq -c --arg owner tonhe --argjson max 1 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
 check "select: other owner sees only their issue" \
   "[3]" "$(jq -c --arg owner mallory --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
+
+# ---------- pr.jq: which issue a PR belongs to (branch issue-N; the body marker only agrees or not) ----------
+pri() { jq -nc -L "$root/lib" --arg h "$1" --arg b "$2" 'include "pr"; {headRefName: $h, body: $b} | [branch_issue, pr_issue]'; }
+check "pr: branch issue-N and the same marker -> N, and they agree" "[36,36]" "$(pri issue-36 $'Fix.\n<!-- agent-loop issue=36 -->')"
+check "pr: the number is the branch's; a marker for another issue does not agree" "[36,null]" "$(pri issue-36 '<!-- agent-loop issue=77 -->')"
+check "pr: a second marker naming another issue does not agree" "[36,null]" "$(pri issue-36 $'agent-loop issue=77\n<!-- agent-loop issue=36 -->')"
+check "pr: the same marker twice still agrees" "[36,36]" "$(pri issue-36 $'agent-loop issue=36\n<!-- agent-loop issue=36 -->')"
+check "pr: a marker that only starts with the number does not agree" "[36,null]" "$(pri issue-36 '<!-- agent-loop issue=360 -->')"
+check "pr: no marker does not agree" "[36,null]" "$(pri issue-36 'Fix.')"
+check "pr: a marker on another branch names no issue" "[null,null]" "$(pri feat/x '<!-- agent-loop issue=36 -->')"
+check "pr: issue-0, leading zeros and longer names are not an issue branch" "[null,null]|[null,null]|[null,null]|[null,null]" \
+  "$(pri issue-0 'agent-loop issue=0')|$(pri issue-036 'agent-loop issue=36')|$(pri issue-36-rework 'agent-loop issue=36')|$(pri x/issue-36 'agent-loop issue=36')"
+check "pr: a newline in the branch name cannot smuggle an issue branch" "[null,null]" "$(pri $'x\nissue-36' 'agent-loop issue=36')"
+check "pr: an absurd number is not an issue" "[null,null]" "$(pri issue-99999999999999999999 'agent-loop issue=99999999999999999999')"
+check "pr: missing or null fields name no issue" "[null,null]|[null,null]" \
+  "$(jq -nc -L "$root/lib" 'include "pr"; {} | [branch_issue, pr_issue]')|$(jq -nc -L "$root/lib" 'include "pr"; {headRefName: null, body: null} | [branch_issue, pr_issue]')"
+check "pr: a null body on an issue branch -> the branch's number, no agreement" "[36,null]" "$(jq -nc -L "$root/lib" 'include "pr"; {headRefName: "issue-36", body: null} | [branch_issue, pr_issue]')"
+
+# ---------- select.jq: which open PRs make an issue busy ----------
+selp() {  # prs JSON -> selection over issues 2,5,7,8 (all ready when no PR is open)
+  jq -c --argjson p "$1" '.prs = $p' <<<"$sel_in" | jq -c --arg owner tonhe --argjson max 9 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" 2>&1
+}
+spr() { jq -nc --arg h "$1" --arg b "$2" --argjson fork "${3:-false}" --arg a "${4:-tonhe}" '[{number: 100, headRefName: $h, body: $b, isCrossRepository: $fork, author: {login: $a}}]'; }
+check "select: no open PR -> nothing is busy" "[2,5,7,8]" "$(selp '[]')"
+check "select: the owner's PR on issue-7 with its marker makes #7 busy" "[2,5,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->')")"
+check "select: the owner's PR on issue-7 WITHOUT a marker still makes #7 busy (publish-pr.sh would force-push it)" "[2,5,8]" "$(selp "$(spr issue-7 'Fix.')")"
+check "select: the owner's PR on issue-7 with a marker for #5 makes #7 busy, and not #5" "[2,5,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=5 -->')")"
+check "select: a second, planted marker cannot make another issue busy" "[2,5,8]" "$(selp "$(spr issue-7 $'agent-loop issue=2\n<!-- agent-loop issue=7 -->')")"
+check "select: a marker on a branch that is not issue-N makes nothing busy" "[2,5,7,8]" "$(selp "$(spr feat/x '<!-- agent-loop issue=7 -->')")"
+check "select: a fork PR cannot make an issue busy, even from the owner" "[2,5,7,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->' true)")"
+check "select: someone else's PR cannot make an issue busy" "[2,5,7,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->' false mallory)")"
+check "select: a login that only starts with the owner's is not the owner" "[2,5,7,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->' false tonhe2)")"
+check "select: issue-07 and issue-7-rework are not issue #7's branch" "[2,5,7,8]|[2,5,7,8]" "$(selp "$(spr issue-07 'x')")|$(selp "$(spr issue-7-rework 'x')")"
+check "select: a PR whose author is gone (null) makes nothing busy and is no error" "[2,5,7,8]" \
+  "$(selp '[{"number":100,"headRefName":"issue-7","body":"x","isCrossRepository":false,"author":null}]')"
+check "select: several PRs, each judged on its own" "[5]" \
+  "$(selp "$(jq -c -n --argjson a "$(spr issue-7 'x')" --argjson b "$(spr issue-2 'x')" --argjson c "$(spr issue-5 'x' true)" --argjson d "$(spr issue-8 '<!-- agent-loop issue=5 -->')" '$a + $b + $c + $d')")"
+# A PR list without the branch, fork or author field would make every issue look free, and
+# the next run would force-push over a PR under review. That is an error, not an empty list.
+for f in headRefName isCrossRepository author; do
+  jq -c --argjson p "$(spr issue-7 'x' | jq -c --arg f "$f" 'map(del(.[$f]))')" '.prs = $p' <<<"$sel_in" \
+    | jq -c --arg owner tonhe --argjson max 9 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" >/dev/null 2>&1
+  check "select: a PR list without $f is refused, not read as 'nothing busy'" "5" "$?"
+done
+sel_36='{"issues": [
+  {"number": 36, "createdAt": "2026-01-01T00:00:00Z", "author": {"login": "tonhe"}, "labels": [{"name": "agent:ready"}]},
+  {"number": 77, "createdAt": "2026-01-02T00:00:00Z", "author": {"login": "tonhe"}, "labels": [{"name": "agent:ready"}]}],
+ "prs": [{"number": 100, "headRefName": "issue-36", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": "agent-loop issue=77\n\nCloses #36\n\n<!-- agent-loop issue=36 -->"}]}'
+check "select: a PR on issue-36 whose body also says issue=77 is #36's PR: #77 stays free" "[77]" \
+  "$(jq -c --arg owner tonhe --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_36")"
+check "select-issues.sh: the PR query asks for the branch, the fork flag and the author" "1" \
+  "$(grep -c -- 'gh pr list .*--state open .*--json number,body,headRefName,isCrossRepository,author)$' "$root/scripts/select-issues.sh")"
 
 # ---------- candidates.jq ----------
 cand_in='[
@@ -114,9 +167,9 @@ r=$(vp "$cur" '{"actions":[{"issue":5,"add_labels":[],"remove_labels":[],"split_
 check "plan: splits capped at 5" '5' "$(jq '.apply[0].split_into | length' <<<"$r")"
 
 # ---------- followup.jq ----------
-fu() { jq -c --arg owner tonhe --argjson grace_minutes 120 -f "$root/lib/followup.jq" <<<"$1"; }
+fu() { jq -c --arg owner tonhe --argjson grace_minutes 120 -L "$root/lib" -f "$root/lib/followup.jq" <<<"$1"; }
 now=$(date -u -d '2026-01-01T05:00:00Z' +%s)
-base='{"number":10,"body":"x\n<!-- agent-loop issue=7 -->","createdAt":"2026-01-01T04:00:00Z","isCrossRepository":false,"state":"OPEN"'
+base='{"number":10,"headRefName":"issue-7","body":"x\n<!-- agent-loop issue=7 -->","createdAt":"2026-01-01T04:00:00Z","isCrossRepository":false,"state":"OPEN"'
 check "followup: waiting for CodeRabbit inside grace" '"waiting"' \
   "$(fu "{\"pr\":$base,\"comments\":[],\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$now}" | jq '.reason | split(" ")[0] | ascii_downcase')"
 check "followup: CodeRabbit reviewed -> fix round" 'true' \
@@ -134,6 +187,46 @@ check "followup: stranger cannot fake the round marker" 'false' \
   "$(fu "{\"pr\":$base,\"comments\":$fake_c,\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$now}" | jq '.auto_merge')"
 check "followup: fork PR ignored" 'false' \
   "$(fu "{\"pr\":${base/false/true},\"comments\":[],\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$late}" | jq '.agent_pr')"
+# The issue is the branch's (issue-N). The body starts with model text, so its marker only
+# has to agree; when it does not, the PR is still followed up as #N but never auto-merged.
+fup() {  # head ref, body, comments JSON, reviews JSON, [labels JSON] -> decision
+  jq -nc --arg h "$1" --arg b "$2" --argjson c "$3" --argjson r "$4" --argjson l "${5:-[\"risk:low\"]}" --argjson now "$now" \
+    '{pr: {number: 10, headRefName: $h, body: $b, createdAt: "2026-01-01T04:00:00Z", isCrossRepository: false, state: "OPEN", comments: $c, reviews: $r}, issue_labels: $l, now: $now}' \
+    | jq -c --arg owner tonhe --argjson grace_minutes 120 -L "$root/lib" -f "$root/lib/followup.jq"
+}
+cr_r='[{"author":{"login":"coderabbitai"}}]'
+check "followup: branch and marker agree, round done, risk:low -> auto-merge as the branch's issue" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":true}' \
+  "$(fup issue-36 $'Fix.\n<!-- agent-loop issue=36 -->' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: branch issue-36, marker says 77 -> treated as #36, never auto-merged" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":false}' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: a planted first marker for 77 before the real one for 36 -> #36, never auto-merged" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":false}' \
+  "$(fup issue-36 $'agent-loop issue=77\n\nCloses #36\n\n<!-- agent-loop issue=36 -->' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: ... and the reason says why it is left for the owner" 'true' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' "$done_c" '[]' | jq '.reason | test("marker") and test("left for the owner")')"
+check "followup: issue branch without a marker, round done, risk:low -> #36, never auto-merged" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":false}' \
+  "$(fup issue-36 'Fix.' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: a marker mismatch does not stop the single fix round, which runs on the branch's issue" '{"agent_pr":true,"issue":36,"fix_round":true,"auto_merge":false}' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' '[]' "$cr_r" | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: a marker mismatch without risk:low keeps the ordinary reason" '"fix round done, not risk:low: left for the owner"' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' "$done_c" '[]' '["risk:medium"]' | jq '.reason')"
+check "followup: a marker on a branch that is not issue-N is not an agent PR" '{"agent_pr":false,"issue":null,"fix_round":false,"auto_merge":false}' \
+  "$(fup feat/x '<!-- agent-loop issue=36 -->' "$done_c" "$cr_r" | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: issue-036 and issue-0 are not agent PRs" 'false|false' \
+  "$(fup issue-036 '<!-- agent-loop issue=36 -->' "$done_c" '[]' | jq '.agent_pr')|$(fup issue-0 '<!-- agent-loop issue=0 -->' "$done_c" '[]' | jq '.agent_pr')"
+check "followup: a PR view without headRefName is not an agent PR (nothing is read from the body)" 'false' \
+  "$(jq -c --arg owner tonhe --argjson grace_minutes 120 -L "$root/lib" -f "$root/lib/followup.jq" <<<"{\"pr\":{\"number\":10,\"body\":\"<!-- agent-loop issue=7 -->\",\"createdAt\":\"2026-01-01T04:00:00Z\",\"isCrossRepository\":false,\"state\":\"OPEN\",\"comments\":$done_c,\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$now}" | jq '.agent_pr')"
+fu_yml="$root/.github/workflows/followup.yml"
+check "followup.yml: no issue number is read from the PR body in shell" "0|0|0" \
+  "$(grep -c 'agent-loop issue=' "$fu_yml")|$(grep -c 'head -1' "$fu_yml")|$(grep -c 'grep -oE' "$fu_yml")"
+check "followup.yml: the sweep, the plan loop and the fix job all map a PR to its issue with the shared helper" "3" "$(grep -c 'include "pr"; .*branch_issue' "$fu_yml")"
+check "followup.yml: every PR read asks for the head branch" "0" "$(grep -E 'gh pr (list|view) .*--json ' "$fu_yml" | grep -v 'autoMergeRequest' | grep -vc 'headRefName')"
+check "followup.yml: followup.jq is run with the lib path, so it can load the helper" "1" "$(grep -c -- '-L lib -f lib/followup.jq' "$fu_yml")"
+check "followup.yml: the fix job loads the scripts before it maps the PR to an issue" "1" \
+  "$(awk '/^  fix:/{on=1} on && /agent-loop-src "\$RUNNER_TEMP\/agent-loop"/{seen=1} on && /id: meta/{print (seen ? 1 : 0); exit}' "$fu_yml")"
+check "followup.yml: no PR text or branch name is interpolated into a run: block" "0" \
+  "$(grep -cE '\$\{\{[^}]*(pull_request|head_ref|head\.ref|\.body|\.title)' "$fu_yml")"
+check "followup.yml: the plan and meta run blocks interpolate no expression at all" "0|0" \
+  "$(awk '/^      - id: p$/{on=1} on && /^        run: \|/{r=1; next} r && /^  [a-z]/{exit} r' "$fu_yml" | grep -c '\${{')|$(awk '/id: meta/{on=1} on && /^        run: \|/{r=1; next} r && /^      - /{exit} r' "$fu_yml" | grep -c '\${{')"
 
 # ---------- check-diff.sh ----------
 tmp=$(mktemp -d); (
@@ -245,6 +338,12 @@ check "gate: shell syntax in the branch name or body is never run" "0|run=true,m
   "$(gate 'x$(touch pwned);touch pwned' '$(touch pwned) `touch pwned`')|$([[ -e "$gt/pwned" ]] && echo yes || echo no)"
 check "gate: a newline in the branch name cannot smuggle an agent branch" "0|run=true,mode=owner" "$(gate $'x\nissue-36' 'x')"
 check "gate: a body cannot write extra outputs (mode is the script's own word)" "0|run=true,mode=owner" "$(gate feat/x $'x\nmode=loop\nissue=1')"
+check "gate: issue-0 is not an issue, even when the marker says 0" "1|" "$(gate issue-0 '<!-- agent-loop issue=0 -->')"
+check "gate: a branch with leading zeros and no marker still fails closed" "1|" "$(gate issue-036 'x')"
+check "gate: the same marker twice still agrees" "0|run=true,mode=loop,issue=36" "$(gate issue-36 $'agent-loop issue=36\n<!-- agent-loop issue=36 -->')"
+check "gate: an absurd issue number fails closed" "1|" "$(gate issue-99999999999999999999 '<!-- agent-loop issue=99999999999999999999 -->')"
+check "gate: the PR-to-issue rule is the shared helper, not a second copy" "1|0" \
+  "$(grep -c 'include "pr"; .*pr_link' "$root/scripts/review-gate.sh")|$(grep -c 'grep -oE' "$root/scripts/review-gate.sh")"
 rm -rf "$gt"
 rv_yml="$root/.github/workflows/review.yml"
 check "review.yml: the head branch reaches the gate through env only" "1|0" \
@@ -920,6 +1019,11 @@ check "select-issues: scheduled run asks for the milestone field" "1" "$(grep -c
 out=$(S_READY="$ready" S_OPEN='[4,20,21]' gsrun bash "$root/scripts/select-issues.sh" scheduled 2>"$gs/err"); rc=$?
 check "select-issues: dependency and milestone APIs down -> still selects" "[20,21] 0" "$out $rc"
 check "select-issues: ... with one warning each" "2" "$(grep -c '^::warning::' "$gs/err")"
+out=$(S_READY="$ready" S_OPEN='[20,21]' S_GRAPHQL='{"data":{"repository":{"issues":{"nodes":[]}}}}' S_MILESTONES='[]' \
+      S_PRS='[{"number":90,"headRefName":"issue-20","isCrossRepository":false,"author":{"login":"tonhe"},"body":"no marker, and agent-loop issue=21"},
+              {"number":91,"headRefName":"issue-21","isCrossRepository":true,"author":{"login":"mallory"},"body":"<!-- agent-loop issue=21 -->"}]' \
+      gsrun bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null)
+check "select-issues: the owner's open PR on issue-20 keeps #20 out; a stranger's fork PR does not keep #21 out" "[21]" "$out"
 : > "$gs/log"
 out=$(S_ISSUE='{"number":21,"state":"OPEN","author":{"login":"tonhe"},"labels":[]}' S_GRAPHQL="$dep21" gsrun bash "$root/scripts/select-issues.sh" manual 21 2>/dev/null)
 check "select-issues: manual run overrides a native blocker" "[21]" "$out"

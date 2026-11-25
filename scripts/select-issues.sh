@@ -2,7 +2,7 @@
 # Choose which issues the dev agent works on. Prints a JSON array of numbers.
 # Usage: select-issues.sh MODE [ISSUE]
 #   MODE=scheduled  owner-authored, agent:ready, not in progress, not agent:paired, not blocked ("Blocked by #N"
-#                   text or a native dependency), no open agent PR; ordered by milestone group, then by
+#                   text or a native dependency), no open PR of the owner's on branch issue-N; ordered by milestone group, then by
 #                   SELECTION_ORDER (lib/select.jq)
 #   MODE=manual     the given issue, if owner-authored and open (you running it is the approval: blockers
 #                   and agent:paired included)
@@ -37,7 +37,9 @@ case "$mode" in
     issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --author "$OWNER_LOGIN" \
                --label agent:ready --limit 100 --json number,labels,createdAt,author,body,milestone)
     open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 500 --json number --jq '[.[].number]')
-    prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 100 --json number,body)
+    # Which issues already have an open PR is decided from the head branch, the fork flag
+    # and the author (lib/select.jq, lib/pr.jq), not from the PR body.
+    prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 100 --json number,body,headRefName,isCrossRepository,author)
     # Native dependencies; {} with a warning if the API is unavailable.
     native=$(bash "$here/scripts/native-blockers.sh")
     # Open milestones, for milestone priority. Without them the order is oldest first, as before.
