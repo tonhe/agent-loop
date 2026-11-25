@@ -16,6 +16,17 @@ include "paired";
 # to them is the owner's decision. Not being candidates, they are also outside the
 # allowed set of validate-plan.jq, so no plan can label them.
 def is_assessment: (.body // "") | contains("<!-- agent-assessment -->");
+# assessed_at: assessment comment -> when it was last written. apply-backlog.sh edits the
+# one assessment comment in place, so its createdAt stays at the first run; the script
+# therefore stamps the time of each write on the comment's second line:
+#   <!-- agent-assessment -->
+#   <!-- assessed-at 2026-11-25T16:35:25Z -->
+# Only that exact place counts (anything further down is text the model wrote), and the
+# stamp can only move the time forward from createdAt. Without a stamp it is createdAt.
+def assessed_at:
+  .createdAt as $c
+  | ((.body // "") | capture("\\A<!-- agent-assessment -->\\r?\\n<!-- assessed-at (?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z) -->") | .t) // $c
+  | if . > $c then . else $c end;
 
 ($ARGS.named.native // {}) as $native
 | ($ARGS.named.parents // {}) as $parents
@@ -27,7 +38,7 @@ def is_assessment: (.body // "") | contains("<!-- agent-assessment -->");
   | . as $i
   | ([.comments[] | select(.author.login == $owner and is_assessment)] | last) as $a
   | ([.comments[] | select(.author.login == $owner and (is_assessment | not))]) as $mine
-  | select($a == null or ([$mine[] | select(.createdAt > $a.createdAt)] | length > 0))
+  | select($a == null or (($a | assessed_at) as $at | [$mine[] | select(.createdAt > $at)] | length > 0))
   | {
       number, title, body,
       labels: [.labels[].name],
