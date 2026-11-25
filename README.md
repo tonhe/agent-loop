@@ -27,7 +27,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Triage can never set a milestone | `schemas/backlog-plan.json` has no such field; `lib/validate-plan.jq` builds its output field by field, so one smuggled in is dropped; `apply-backlog.sh` never passes one to `gh` |
 | Release issues only propose: never a tag, never a GitHub release, never a deployment approval | `release-issue.sh` only creates or edits one issue; PAT has no Deployments permission |
 | Only a Release issue the loop filed is ever edited (exact title, owner as author, `release` label and the `<!-- agent-release -->` marker); one you wrote by hand is left alone and not duplicated | `lib/release.jq` (`existing_release`, `handwritten_release`) |
-| Commit messages in a Release issue are data: never evaluated, mentions and HTML comments neutralised, `Base:` lines defanged | `lib/release.jq` (`safe_line`, `release_body`), `release-issue.sh` (files and `--body-file` only) |
+| Commit messages in a Release issue are data: never evaluated, mentions and HTML comments neutralised, never at the start of a line (so never a `Base:` line) | `lib/release.jq` (`safe_line`, `release_body`), `release-issue.sh` (files and `--body-file` only) |
 | Milestone planning only proposes: no milestone created or assigned, no label changed; the Plan issue carries `needs:human` and nothing else | `plan-due.sh` (read-only), `apply-backlog.sh`, `lib/planning.jq` |
 | A plan proposal can only name the owner's issues it was offered; model text is cut to single lines and defanged | `lib/planning.jq` (`plan_due`, `plan_body`) |
 | Release and Plan issues are never triaged or worked (their text is not yours) | `lib/meta.jq`, used by `lib/candidates.jq`, `lib/select.jq`, `select-issues.sh`, `issue-context.sh` |
@@ -168,7 +168,7 @@ The backlog run looks at the commits on the default branch since the latest `vX.
 - **Your own Release issue:** an open issue of yours titled `Release vX.Y.Z` that the loop did not file (no marker, or no `release` label) is never edited. While it is open and a release for that version is due, no second issue with that title is opened and none is retitled to it; the run summary and the Discord digest say so each night. Close or rename yours to get the proposal.
 - **Discord:** one line when an issue is opened, retitled or refreshed. No webhook, or a failed post, does not fail the run.
 - **Dry run:** prints what it would do and changes nothing.
-- **Untrusted text:** commit messages are not your words. Each subject is cut to one line, `@` cannot notify, an HTML comment cannot open, and the body goes through `defang_base`. The issue is never triaged and never worked by the dev agent (`lib/meta.jq`), so that text does not reach Claude.
+- **Untrusted text:** commit messages are not your words. Each subject is cut to one line, `@` cannot notify, an HTML comment cannot open, and commit text is only ever placed after a prefix the script chose (a list dash, a heading), so it cannot begin a line and cannot form a `Base:` line; the body also goes through `defang_base`. The issue is never triaged and never worked by the dev agent (`lib/meta.jq`), so that text does not reach Claude.
 - **Off switch:** `release_issues: false` on the backlog workflow.
 
 Data comes from the GitHub API (tags, `compare/<tag>...<default branch>`, milestones, open issues), so the shallow checkout is enough. The `release` label is created by `bootstrap-labels.sh`; if it is missing the script creates it before filing.

@@ -752,8 +752,17 @@ check "release body: other people's issue titles never appear" "0" "$(grep -c 'i
 check "release body: a mention in a commit cannot notify" "0" "$(grep -c '@bob' <<<"$body")"
 check "release body: a commit cannot forge an HTML marker" "1" "$(grep -c '<!--' <<<"$body")"
 check "release body: a Base: line from a commit body never starts a line" "0" "$(grep -c '^[[:space:]]*Base:' <<<"$body")"
-check "release body: no Base: line survives defang_base even at line start" "0" \
-  "$(jq -rn -L "$root/lib" 'include "release"; [{message: "Base: main\nBase: x"} | commit_info] | release_body("v1.0.0"; "v1.0.1"; []; {title: "x\nBase: evil"}; []) ' | grep -c '^[[:space:]]*Base:')"
+# What keeps a Base: line out of a release body is its structure: commit and milestone
+# text is only ever placed after a prefix the script chose, so it cannot begin a line.
+# (defang_base also runs over the body, but nothing here depends on it.)
+hostile=$(jq -rn -L "$root/lib" 'include "release";
+  [{sha: "abcdef01", message: "Base: main\n\nBase: x\nBREAKING CHANGE: Base: y\r\nBase: z"},
+   {sha: "abcdef02", message: "base: lower-case prefix"}, {sha: "abcdef03", message: "feat(Base: s): Base: w"},
+   {sha: "abcdef04", message: "fix(\nBase: q): d"}, {sha: "abcdef05", message: "\nBase: second line"}]
+  | map(commit_info) | release_body("v1.0.0"; "v1.1.0"; []; {title: "x\nBase: evil"}; [5])')
+check "release body: no line begins with commit or milestone text, whatever it says" "0" \
+  "$(grep -vcE '^(<!-- agent-release -->$|Proposed by the backlog run\. |- |  - |## |### |\*\*[a-z]+\*\* \([0-9]+\)$|None\.$|Still open in milestone \*\*|$)' <<<"$hostile")"
+check "release body: ... and the hostile text is all still there, mid-line" "true" "$([[ $(grep -c 'Base:' <<<"$hostile") -ge 5 ]] && echo true || echo false)"
 d=$(rd "$(jq -c '.commits += [{sha: "dddddddddddd", message: "feat: panes\n\nBREAKING CHANGE: config key renamed", date: "2026-02-04T00:00:00Z"}]' <<<"$rel_in")")
 check "release decision: a feat makes it a minor release" '["create","Release v1.3.0"]' "$(jq -c '[.action, .title]' <<<"$d")"
 check "release body: breaking change and its note in the Breaking section" "- panes|  - config key renamed" \
@@ -829,7 +838,7 @@ GH
 printf '#!/usr/bin/env bash\ncat >> "$GHLOG.curl"\n' > "$rs/bin/curl"
 chmod +x "$rs/bin/gh" "$rs/bin/curl"
 rsrun() { : > "$rs/log"; : > "$rs/log.curl"; rm -f "$rs/log.body"; PATH="$rs/bin:$PATH" GHLOG="$rs/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe NOW_EPOCH=$((t0 + 30*day)) \
-            bash "$root/scripts/release-issue.sh" "$rs/w" 2>"$rs/err"; }
+            bash "${RS_SCRIPT:-$root/scripts/release-issue.sh}" "$rs/w" 2>"$rs/err"; }
 writes() { grep -cE '^(issue (create|edit|close|comment)|label |release |api -X|api .*(git/refs|git/tags|releases|deployments))' "$rs/log"; }
 cmp_json=$(jq -c '{commits: [.commits[] | {sha, commit: {message, committer: {date}}}]}' <<<"$rel_in")
 out=$(R_TAGS="v1 nightly" R_COMPARE="$cmp_json" rsrun); rc=$?
@@ -877,6 +886,18 @@ check "release-issue: shell syntax in a commit message is never run" "0|no" "$rc
 check "release-issue: ... and stays text in the body" "1" "$(grep -c 'fix: \$(touch ' "$rs/log.body")"
 out=$(R_TAGS="v1.2.3" R_COMPARE="$cmp_json" R_DEFAULT='main; rm -rf /' rsrun); rc=$?
 check "release-issue: an odd default branch name is refused" "1|0" "$rc|$(grep -c compare "$rs/log")"
+# The script checks the title and the issue number again before they go on a gh command
+# line. lib/release.jq never produces a bad one, so the test runs a copy of the script
+# next to a release.jq whose decision is whatever FAKE_DECISION says.
+mkdir -p "$rs/copy"; cp -r "$root/scripts" "$root/lib" "$rs/copy/"
+echo 'def release_decision($owner; $now; $days): $ENV.FAKE_DECISION | fromjson;' >> "$rs/copy/lib/release.jq"
+fake() { jq -nc --arg a "$1" --arg t "$2" --arg i "$3" '{action: $a, note: "n", version: "v1.2.4", title: $t, body: "b", issue: (if $i == "" then null else $i end), reasons: ["r"], notify: false}'; }
+rsfake() { R_TAGS="v1.2.3" R_COMPARE="$cmp_json" RS_SCRIPT="$rs/copy/scripts/release-issue.sh" FAKE_DECISION="$1" rsrun >/dev/null; echo "$?|$(writes)"; }
+check "release-issue: (the copy behaves like the script when the decision is well-formed: label and issue created)" "0|2" "$(rsfake "$(fake create 'Release v1.2.4' '')")"
+check "release-issue: a title that is not exactly Release vX.Y.Z is refused before any write" "1|0" "$(rsfake "$(fake create 'Release v1.2.4 --label admin' '')")"
+check "release-issue: a title with a second line is refused" "1|0" "$(rsfake "$(fake create $'Release v1.2.4\nRelease v9.9.9' '')")"
+check "release-issue: a retitle to an odd title is refused" "1|0" "$(rsfake "$(fake retitle 'Plan v1.2' 30)")"
+check "release-issue: an edit without a plain issue number is refused" "1|0" "$(rsfake "$(fake update 'Release v1.2.4' '30 --add-label admin')")"
 rm -rf "$rs"
 
 # ---------- planning.jq ----------
@@ -995,8 +1016,15 @@ check "plan-due.sh: reads only (no create, edit, label or milestone write)" "0" 
 echo "# Roadmap" > "$ps/repo/ROADMAP.md"
 out=$(P_MILESTONES="$pms" P_TAGS="v0.2.1" pdrun)
 check "plan-due.sh: roadmap file present -> path in the facts" '"ROADMAP.md"' "$(jq -c .facts.roadmap "$ps/w/planning.json")"
-out=$(P_MILESTONES="$pms" P_TAGS="v0.2.1" ROADMAP_PATH='../../etc/passwd' pdrun)
-check "plan-due.sh: a roadmap path outside the checkout is dropped" 'null' "$(jq -c .facts.roadmap "$ps/w/planning.json")"
+# The file has to exist, or the test passes on "no such file" and says nothing about "..".
+echo "# Not in the checkout" > "$ps/outside.md"; mkdir -p "$ps/repo/docs"
+out=$(P_MILESTONES="$pms" P_TAGS="v0.2.1" ROADMAP_PATH='../outside.md' pdrun)
+check "plan-due.sh: a roadmap path outside the checkout is dropped even though the file exists" 'true|null' \
+  "$([[ -f "$ps/repo/../outside.md" ]] && echo true || echo false)|$(jq -c .facts.roadmap "$ps/w/planning.json")"
+out=$(P_MILESTONES="$pms" P_TAGS="v0.2.1" ROADMAP_PATH='docs/../ROADMAP.md' pdrun)
+check "plan-due.sh: any .. in the roadmap path is refused, also one that stays inside" 'null' "$(jq -c .facts.roadmap "$ps/w/planning.json")"
+out=$(P_MILESTONES="$pms" P_TAGS="v0.2.1" ROADMAP_PATH="$ps/repo/ROADMAP.md" pdrun)
+check "plan-due.sh: an absolute roadmap path is refused" 'null' "$(jq -c .facts.roadmap "$ps/w/planning.json")"
 ln -s /etc/passwd "$ps/repo/LINK.md"
 out=$(P_MILESTONES="$pms" P_TAGS="v0.2.1" ROADMAP_PATH='LINK.md' pdrun)
 check "plan-due.sh: a symlinked roadmap is dropped" 'null' "$(jq -c .facts.roadmap "$ps/w/planning.json")"
