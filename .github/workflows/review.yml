@@ -1,6 +1,33 @@
-# Reusable: Claude review of agent PRs. Make the job "agent-review" a required status check.
-# Non-agent PRs and fork PRs pass straight through (they are yours to review); that
-# includes the protected_review_paths check, which only looks at agent PRs.
+# Reusable: Claude review of the owner's pull requests. Make the job "agent-review" a
+# required status check.
+#
+# scripts/review-gate.sh sorts each PR into one of two modes:
+#
+#   loop    A PR the dev agent published: opened by owner_login, head branch issue-N, and
+#           the "agent-loop issue=N" marker in the body. Reviewed against issue N. The
+#           review BLOCKS: a non-pass verdict, a failed Claude call or a protected file
+#           changed without an "Owner decision" comment on the issue fails this check.
+#   owner   Any other PR opened by owner_login from a branch of this repository, for
+#           example one pushed by the owner's own interactive agent. Reviewed against
+#           the owner's issues the body links (Fixes/Closes/Resolves/Refs #N), or on the
+#           diff alone. The review is ADVISORY: it is posted, and updated in place on
+#           every push, and this check ends in success whatever it says. A Claude
+#           failure, a timeout, a malformed result or a broken review step also ends in
+#           success, with a comment or a step-summary note that the review could not be
+#           completed. Protected files are listed in the review for the owner; nothing
+#           is blocked and no "Owner decision" comment counts as approval.
+#
+# Fork PRs and PRs opened by anyone else pass straight through (they are yours to
+# review): nothing is checked out and Claude is not asked. An issue-N branch without a
+# matching marker, or a marker on another branch, fails the check rather than guessing.
+#
+# A PR over split_max_files files or split_max_lines changed lines is reviewed in
+# several Claude calls, one per group of files, and still gets ONE comment. Both modes.
+#
+# Cost: every push to an owner PR now runs one Claude call, or several for a large PR.
+#
+# Everything that comes from the pull request (body, branch, author, file names) reaches
+# the scripts through env or through git, and is only compared or passed on as data.
 name: agent-loop review
 
 on:
@@ -9,20 +36,25 @@ on:
       owner_login:     {type: string, required: true}
       platforms:       {type: string, default: "Linux, macOS, and Windows"}
       verify_command:  {type: string, required: true}
-      protected_review_paths: {type: string, default: "", description: "Newline-separated globs. An agent PR touching one needs an 'Owner decision' comment by the owner on its issue. Empty = off."}
+      protected_review_paths: {type: string, default: "", description: "Newline-separated globs. A loop PR touching one needs an 'Owner decision' comment by the owner on its issue; an owner PR gets them listed in the review. Empty = off."}
       model:           {type: string, default: sonnet}
       max_turns:       {type: number, default: 25}
       timeout_minutes: {type: number, default: 15}
       claude_version:  {type: string, default: "2.1.331"}
       loop_ref:        {type: string, default: main}
       loop_repo:       {type: string, default: tonhe/agent-loop}
+      split_max_files:      {type: number, default: 40, description: "A PR touching more files than this is reviewed in several Claude calls."}
+      split_max_lines:      {type: number, default: 3000, description: "A PR with more changed lines (added + deleted) than this is reviewed in several Claude calls."}
+      split_max_calls:      {type: number, default: 8, description: "Most Claude calls for one review; beyond it the smallest groups are merged."}
+      split_max_diff_bytes: {type: number, default: 300000, description: "Largest diff, in bytes, put into one prompt; the rest is cut and the review says so."}
+      job_timeout_minutes:  {type: number, default: 120, description: "Timeout of the whole job. The Claude calls share this minus 15 minutes; timeout_minutes still limits each call."}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: {required: true}
 
 jobs:
   agent-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
     steps:
       # The scripts are loaded first so the gate below is the tested one (scripts/review-gate.sh).
       - uses: actions/checkout@v4
@@ -31,9 +63,10 @@ jobs:
       - name: Load agent-loop scripts outside the workspace
         run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
 
-      # The issue number comes from the head branch name (publish-pr.sh pushes issue-N),
-      # not from the PR body, whose first part the model wrote. The body marker has to
-      # agree, or the check fails. PR text reaches the script through env only.
+      # Outputs: run (true|false), mode (loop|owner), issue (loop mode only).
+      # In loop mode the issue number comes from the head branch name (publish-pr.sh
+      # pushes issue-N), not from the PR body, whose first part the model wrote. The body
+      # marker has to agree, or the check fails. PR text reaches the script through env only.
       - name: Is this an agent PR?
         id: gate
         env:
@@ -44,14 +77,37 @@ jobs:
           OWNER_LOGIN: ${{ inputs.owner_login }}
         run: bash "$RUNNER_TEMP/agent-loop/scripts/review-gate.sh"
 
-      - if: steps.gate.outputs.run == 'true'
+      # From here on every step of an owner PR is advisory. Scripts run under
+      # scripts/advisory.sh, which turns a failure into a warning when MODE is owner and
+      # passes it on unchanged otherwise; the two steps that are not scripts use
+      # continue-on-error the same way. MODE is the gate's own word, never PR text.
+      - name: Check out the PR
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: ${{ steps.gate.outputs.mode == 'owner' }}
         uses: actions/checkout@v4
         with: {ref: "${{ github.event.pull_request.head.sha }}", persist-credentials: false, fetch-depth: 0}
 
-      # Deterministic part of the protected-by-instruction check (scripts/review-protected.sh):
-      # protected files changed and no "Owner decision" comment from the owner on the issue
-      # -> the script posts the blocking comment and fails this job; Claude is not asked.
-      # With a decision comment it writes a section for the prompt and Claude judges scope.
+      # Owner mode only (scripts/review-linked.sh): issue numbers from "Fixes #N" and the
+      # like in the PR body, at most 5. An issue is used only if owner_login opened it
+      # and it is not a Release or Plan issue (issue-context.sh decides), with the owner's
+      # comments only. Anything else is skipped with a log line.
+      - name: Linked issues (owner PRs)
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.mode == 'owner'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_LOGIN: ${{ inputs.owner_login }}
+          MODE: ${{ steps.gate.outputs.mode }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/advisory.sh" bash "$RUNNER_TEMP/agent-loop/scripts/review-linked.sh" "$RUNNER_TEMP/review/linked"
+
+      # Deterministic part of the protected-by-instruction check (scripts/review-protected.sh).
+      # Loop mode: protected files changed and no "Owner decision" comment from the owner
+      # on the issue -> the script posts the blocking comment and fails this job; Claude
+      # is not asked. With a decision comment it writes a section for the prompt and
+      # Claude judges scope.
+      # Owner mode: never blocks and never posts. It writes a section that lists every
+      # protected file changed and quotes the owner's "Owner decision" comments from the
+      # linked issues; the post step puts that section into the review as it is.
       # The globs are caller input and reach the script through env only.
       - name: Protected-by-instruction paths
         if: steps.gate.outputs.run == 'true' && inputs.protected_review_paths != ''
@@ -62,9 +118,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           ISSUE: ${{ steps.gate.outputs.issue }}
           PR: ${{ github.event.pull_request.number }}
-        run: bash "$RUNNER_TEMP/agent-loop/scripts/review-protected.sh" "$ISSUE" "$PR" "$RUNNER_TEMP/protected"
+          MODE: ${{ steps.gate.outputs.mode }}
+          LINKED_JSON: ${{ runner.temp }}/review/linked/linked.json
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/advisory.sh" bash "$RUNNER_TEMP/agent-loop/scripts/review-protected.sh" "$ISSUE" "$PR" "$RUNNER_TEMP/review/protected"
 
-      - name: Build review prompt
+      # One prompt per Claude call (scripts/review-prompts.sh). The split plan is
+      # lib/split.jq; file names from the diff are only ever literal git pathspecs.
+      - name: Build review prompt(s)
         if: steps.gate.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -73,14 +133,23 @@ jobs:
           PLATFORMS: ${{ inputs.platforms }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           ISSUE: ${{ steps.gate.outputs.issue }}
-        run: |
-          L="$RUNNER_TEMP/agent-loop"
-          { bash "$L/scripts/render-prompt.sh" "$L/prompts/review.md"; echo
-            echo "## Issue"; bash "$L/scripts/issue-context.sh" "$ISSUE"; echo
-            if [[ -s "$RUNNER_TEMP/protected/section.md" ]]; then cat "$RUNNER_TEMP/protected/section.md"; echo; fi
-            echo "## Diff"; echo '```diff'; git diff "$BASE_SHA"...HEAD; echo '```'; } > "$RUNNER_TEMP/prompt.md"
-          npm install -g "@anthropic-ai/claude-code@${{ inputs.claude_version }}"
+          MODE: ${{ steps.gate.outputs.mode }}
+          SPLIT_MAX_FILES: ${{ inputs.split_max_files }}
+          SPLIT_MAX_LINES: ${{ inputs.split_max_lines }}
+          SPLIT_MAX_CALLS: ${{ inputs.split_max_calls }}
+          SPLIT_MAX_DIFF_BYTES: ${{ inputs.split_max_diff_bytes }}
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/advisory.sh" bash "$RUNNER_TEMP/agent-loop/scripts/review-prompts.sh" "$RUNNER_TEMP/review"
 
+      - name: Install Claude Code
+        if: steps.gate.outputs.run == 'true'
+        env:
+          MODE: ${{ steps.gate.outputs.mode }}
+          CLAUDE_VERSION: ${{ inputs.claude_version }}
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/advisory.sh" npm install -g "@anthropic-ai/claude-code@$CLAUDE_VERSION"
+
+      # The calls run one after the other (scripts/review-calls.sh), each with its own
+      # timeout, inside the job's time budget. Loop mode stops at the first failure and
+      # fails; owner mode carries on. This step has the Claude token and no GitHub token.
       - name: Claude reviews (read-only tools)
         if: steps.gate.outputs.run == 'true'
         env:
@@ -88,19 +157,21 @@ jobs:
           MODEL: ${{ inputs.model }}
           MAX_TURNS: ${{ inputs.max_turns }}
           TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+          JOB_TIMEOUT_MIN: ${{ inputs.job_timeout_minutes }}
+          MODE: ${{ steps.gate.outputs.mode }}
           ALLOWED_TOOLS: "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
-        run: bash "$RUNNER_TEMP/agent-loop/scripts/run-claude.sh" "$RUNNER_TEMP/prompt.md" "$RUNNER_TEMP/agent-loop/schemas/review.json" "$RUNNER_TEMP/claude"
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/advisory.sh" bash "$RUNNER_TEMP/agent-loop/scripts/review-calls.sh" "$RUNNER_TEMP/review" "$RUNNER_TEMP/agent-loop/schemas/review.json"
 
-      # Posted with the workflow's own token, so it shows as github-actions[bot], not as you.
+      # One comment (scripts/review-post.sh), posted with the workflow's own token, so it
+      # shows as github-actions[bot], not as you. Loop mode: a new comment, and the check
+      # fails unless the verdict is pass. Owner mode: the bot's earlier owner-review
+      # comment is updated in place, and the check passes whatever the verdict; this step
+      # also runs when an earlier step failed, to say that the review is missing.
       - name: Post review and set the check
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && !cancelled() && (success() || steps.gate.outputs.mode == 'owner')
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-        run: |
-          R="$RUNNER_TEMP/claude/result.json"
-          body=$(jq -r '"<!-- agent-review -->\n### Agent review: \(.verdict | ascii_upcase)\n\n\(.summary)\n\n"
-            + (.findings | map("- **\(.severity)** " + (if .file then "`\(.file)" + (if .line then ":\(.line)" else "" end) + "` " else "" end) + .comment) | join("\n"))' "$R")
-          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$body"
-          echo "$body" >> "$GITHUB_STEP_SUMMARY"
-          [[ $(jq -r '.verdict' "$R") == "pass" ]] || { echo "::error::Agent review blocked this PR"; exit 1; }
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MODE: ${{ steps.gate.outputs.mode }}
+        run: bash "$RUNNER_TEMP/agent-loop/scripts/advisory.sh" bash "$RUNNER_TEMP/agent-loop/scripts/review-post.sh" "$RUNNER_TEMP/review" "$PR"

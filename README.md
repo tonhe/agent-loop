@@ -7,6 +7,7 @@ Reusable GitHub Actions workflows that run Claude Code as an unattended issue-to
                    + propose: "Release vX.Y.Z" issue, "Plan vX.Y" issue (never tags, never moves milestones)
 2:17 AM  dev       up to 3 agent:ready issues, one job each -> PR as the owner
 on PR    review    Claude review (required check) + CodeRabbit
+                   loop PRs: blocking; your own PRs: advisory, one comment kept up to date
 after    followup  one fix round -> auto-merge if risk:low
 always   digest    Discord message per run
 ```
@@ -19,8 +20,15 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 |---|---|
 | Blocked issues wait: "Blocked by #N" (or "after #N merges") while #N is open, a blocker with no number, or an open blocker in GitHub's native issue dependencies keeps an issue out of triage and dev | `lib/blocked.jq`, `lib/native-blockers.jq`, `native-blockers.sh` |
 | A per-issue base branch must be a plain branch name that already exists; anything else hands the issue back | `lib/base.jq`, `resolve-base.sh` |
-| Only the owner's issues are ever shown to Claude | `select-issues.sh`, `issue-context.sh`, `lib/candidates.jq` (author check) |
+| Only the owner's issues are ever shown to Claude | `select-issues.sh`, `issue-context.sh`, `lib/candidates.jq` (author check); the review of an owner PR reads linked issues through `issue-context.sh` too (`review-linked.sh`) |
 | Other people's comments never reach Claude | `issue-context.sh`, `review-context.sh` (owner, CodeRabbit, github-actions only) |
+| From the body of an owner PR, which a model may have written, only issue numbers are taken: at most 5, this repository only | `lib/review.jq` (`linked_issues`), `review-linked.sh` |
+| A model cannot block your own PR: the review of an owner PR is advisory, and a Claude failure, a timeout, a malformed result or a broken review step also ends in success | `review-post.sh` (owner mode exits 0), `advisory.sh` around every review step, `continue-on-error` on the two steps that are not scripts |
+| On an owner PR nothing counts as approval of a protected file: every protected file changed is listed in the review by script, an "Owner decision" comment is only quoted next to it | `review-protected.sh` (`MODE=owner`), `lib/glob.jq` (`owner_protected`) |
+| An owner review can never be taken for a loop review, and never stacks: its own marker, one comment updated in place, found by marker and by author `github-actions[bot]` | `lib/review.jq` (`review_marker`, `existing_review_comment`), `review-post.sh` |
+| Model text in a posted review cannot open an HTML comment, so it cannot plant a loop marker | `lib/review.jq` (`review_combine`) |
+| A loop PR never passes on a review that did not see everything: a diff that had to be cut, a changed file that is in no prompt, a failed call or a result that is not a review all fail the check | `review-prompts.sh` (size and coverage checks), `review-calls.sh`, `lib/review.jq` (`valid_review`, `review_combine`), `review-post.sh` |
+| File names from a diff are data: literal git pathspecs after `--`, or text in a code span | `review-prompts.sh`, `lib/split.jq`, `lib/review.jq` |
 | Backlog manager can't do anything directly | Read-only tools; returns JSON that `lib/validate-plan.jq` filters |
 | `agent:ready` only for `risk:low`; human-set labels kept; `agent:urgent` untouchable | `lib/validate-plan.jq` |
 | `agent:paired` issues are never picked by the nightly dev run and never re-routed or split by triage; the label cannot be added or removed by the plan | `lib/select.jq`, `lib/validate-plan.jq` |
@@ -32,10 +40,10 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | A plan proposal can only name the owner's issues it was offered; model text is cut to single lines and defanged | `lib/planning.jq` (`plan_due`, `plan_body`) |
 | Release and Plan issues are never triaged or worked (their text is not yours) | `lib/meta.jq`, used by `lib/candidates.jq`, `lib/select.jq`, `select-issues.sh`, `issue-context.sh` |
 | Issues the model words (split children, found issues) cannot pass for a Release or Plan issue: a title starting `Release v…` or `Plan v…` gets `Re: ` in front, and no `<!-- agent-` marker survives in the body | `lib/meta.jq` (`safe_title`, `defang_markers`), `apply-backlog.sh`, `file-found.sh`; `lib/release.jq` and `lib/planning.jq` also require their own marker before treating an issue as theirs |
-| An agent PR touching a protected-by-instruction path needs your "Owner decision" comment on the issue | `review-protected.sh`, `lib/glob.jq` block without the model; the reviewer judges scope when a decision exists |
-| The model cannot choose which issue a PR is reviewed against | `review-gate.sh` takes the number from the head branch (`issue-N`, set by `publish-pr.sh`) and fails the check unless the body marker agrees; `publish-pr.sh` neutralises `agent-loop issue=` and HTML comments in the model's PR text; `issue-context.sh` refuses Release and Plan issues |
+| A loop PR touching a protected-by-instruction path needs your "Owner decision" comment on the issue | `review-protected.sh`, `lib/glob.jq` block without the model; the reviewer judges scope when a decision exists |
+| The model cannot choose which issue a loop PR is reviewed against | `review-gate.sh` takes the number from the head branch (`issue-N`, set by `publish-pr.sh`) and fails the check unless the body marker agrees; `publish-pr.sh` neutralises `agent-loop issue=` and HTML comments in the model's PR text; `issue-context.sh` refuses Release and Plan issues |
 | No network tools, no MCP, narrow Bash allowlist | `run-claude.sh` (`--tools`, `--allowedTools`, `--strict-mcp-config`, `--permission-mode dontAsk`) |
-| Token limits | `--max-turns`, wall-clock `timeout`, job `timeout-minutes`, max issues per run, model per job |
+| Token limits | `--max-turns`, wall-clock `timeout`, job `timeout-minutes`, max issues per run, model per job; a review is at most `split_max_calls` calls inside one shared time budget (`review-calls.sh`) |
 | Agent can't touch CI, Makefile, coverage floors | `check-diff.sh` (`.github/` always, plus `protected_paths`); PAT lacks Workflows permission |
 | "Done" means verified | Workflow re-runs `verify_command` itself in a step with no secrets |
 | Agent code never runs next to the PAT | Verify step has no secrets; publish step applies a patch in a fresh checkout with hooks disabled |
@@ -91,6 +99,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 - **Pairing with your own agent:** label an issue `agent:paired` when your interactive agent owns it. The nightly dev run never picks it up, and triage still assesses it and sets risk/type labels but leaves its routing alone: no `agent:ready`, no `needs:human`, no split, and the label itself is never added or removed by the loop. `gh workflow run agent-dev.yml -f issue=N` (and `agent:urgent`) still runs it: asking for an issue by number is your approval, the same way it overrides blockers. Remove the label to hand the issue back to the loop.
 - **Releases:** when a release looks due the backlog run opens `Release vX.Y.Z`, assigned to you. It never tags. See "Release issues".
 - **Planning:** when the active milestone runs low the backlog run opens `Plan vX.Y` with a proposal. Answer in the issue; nothing is moved for you. See "Milestone planning".
+- **Your own PRs:** a PR you open from a branch of the repo (by hand or through your interactive agent) gets an advisory review: one comment, updated on every push, and the check passes whatever it says. Write `Fixes #N` (or `Closes`, `Resolves`, `Refs`) in the body to have it reviewed against your issue. Each push costs at least one Claude call. See "Review modes".
 - **Protected files:** if an agent PR is blocked for touching a protected-by-instruction path, comment on the issue starting with `Owner decision` and say what may change, then re-run the review. See "Protected by instruction".
 - **Someone else's issue:** file your own issue that links to theirs. The loop never works external issues.
 - **Found issues:** problems the dev agent notices but doesn't fix get filed as new issues (as you, labeled `agent:found`, max 3 per worked issue, duplicates by title skipped) and go through normal triage. Like split children, they cannot be titled like a Release or Plan issue: such a title is filed as `Re: Release v…` / `Re: Plan v…`.
@@ -188,6 +197,63 @@ When the active milestone has 3 or fewer open issues, the backlog run opens `Pla
 - **Dry run:** the proposal is asked for and reported; no issue is filed.
 - **Off switch:** `milestone_planning: false` on the backlog workflow.
 
+## Review modes
+
+The review workflow (`review.yml`, job `agent-review`) sorts every pull request with `scripts/review-gate.sh`:
+
+| PR | Mode | What happens |
+|---|---|---|
+| Opened by `owner_login`, head branch `issue-N`, body marker `agent-loop issue=N` | `loop` | Reviewed against issue N. **Blocking**: the check fails unless the verdict is pass. |
+| Opened by `owner_login` from a branch of this repository, any other branch name, no marker | `owner` | Reviewed against the issues it links, or on the diff alone. **Advisory**: the check always passes. |
+| From a fork, or opened by anyone else | none | Passes straight through. Nothing is checked out, Claude is not asked. |
+| `issue-N` branch without a matching marker, a marker on another branch, a second marker naming another issue | none | The check fails rather than guessing. Do not name your own branches `issue-N`. |
+
+### Loop mode
+
+Unchanged: the dev agent's PR is reviewed against its issue, a non-pass verdict or a failed Claude call fails the check, and a protected file changed without an "Owner decision" comment is blocked before Claude is asked (see "Protected by instruction"). Each run posts a new comment that begins `<!-- agent-review -->`.
+
+### Owner mode
+
+For the PRs you push yourself, including the ones your local or interactive agent opens under your login.
+
+- **Advisory, always.** The comment is headed `Agent review (advisory): PASS`, `BLOCK`, `... (INCOMPLETE)` or `NOT COMPLETED`, and the `agent-review` check ends in success whatever it says. A model must not be able to block your merge, so a Claude failure, a timeout, a result that is not a review, or an error in any review step also ends in success: the comment (or, if not even that can be posted, the run summary) says the review could not be completed, and the run carries a warning. `review-post.sh` exits 0 in owner mode and every review step runs under `advisory.sh`.
+- **One comment per PR.** The comment begins `<!-- agent-review-owner -->`. On each push the bot's existing comment with that marker is updated in place; a new one is created only when there is none. It says which commit it is for. The comment is found by marker and by author `github-actions[bot]`, so a comment of yours that quotes the marker is never overwritten. The followup workflow only handles PRs with the `agent-loop issue=N` marker, so it never sees an owner PR.
+- **Linked issues as context.** Issue numbers are taken from the PR body: `Fixes #N`, `Closes #N`, `Resolves #N`, `Refs #N` (and `fix`, `fixed`, `close`, `closed`, `resolve`, `resolved`, `ref`), any case, an optional colon, number on the same line. Limits: `#N` of this repository only (`org/repo#5` and issue URLs are ignored), no leading zeros, duplicates count once, at most 5. Nothing else is read from the PR body, which your agent may have written: not its text, not its title. Each number goes through `issue-context.sh`: the issue is used only if you opened it and it is not a Release or Plan issue, and only your comments on it are included. Anything else is skipped with a line in the log. With no usable linked issue the PR is reviewed on its diff alone, and both the prompt and the comment say so.
+- **Protected paths.** Nothing is blocked and nothing is approved. See "Protected by instruction".
+- **Cost.** Every push to one of your PRs now runs at least one Claude call (several for a large PR, see below). The example caller cancels a running review when a new push arrives (`cancel-in-progress`), so only the latest push is reviewed to the end.
+
+### Large PRs (both modes)
+
+A PR that touches more than `split_max_files` files (40) or has more than `split_max_lines` changed lines (3,000; added plus deleted from `git diff --numstat --no-renames`, so a rename counts as a deletion and an addition; binary files count as files only) is reviewed in several Claude calls instead of one prompt:
+
+1. Files are grouped by top-level directory; root-level files are their own group.
+2. A group that is itself over a threshold is divided one level deeper, and again, until every group fits or is a single file. Files that sit directly in a directory that had to be divided form their own group, cut into parts if there are too many.
+3. Small groups are packed together so the number of calls stays low.
+4. If that still gives more than `split_max_calls` groups (8), the smallest are merged until it fits, and the review says so.
+5. A group whose diff is larger than `split_max_diff_bytes` (300,000) is cut into smaller groups file by file, as far as the call limit allows, so that no diff has to be truncated when a finer split avoids it.
+
+The plan is a pure function (`lib/split.jq`: `parse_numstat`, `split_plan`, `refine_plan`). Each call gets the same header, the issue context, the protected-path section, the list of the other parts' paths (so the reviewer knows what it is not seeing), and only its own part's diff. The calls run one after the other. ONE review is posted: a summary per part, all findings merged with their file and line, and the overall verdict is the worst of the parts (pass only if all pass).
+
+Nothing goes unreviewed silently:
+
+- **A diff that still does not fit** (a single file whose own diff is over `split_max_diff_bytes`, or a group left over when the call limit is used up). Loop mode: the check fails with "too large to review completely"; a loop PR is never passed on a cut diff. Owner mode: the diff is cut, the prompt carries a "diff truncated" note, and the review names the files that were not fully shown and is marked incomplete.
+- **A file in no part's diff.** The plan is built from text, and a file name that is not valid UTF-8 does not survive that. After the prompts are built, the files in them are compared byte for byte with the files git says changed. Loop mode: the check fails and says how many files are missing. Owner mode: the review lists them as not reviewed.
+- **A call that fails.** Loop mode: the check fails, as before. Owner mode: the comment names the part that was not reviewed and the other parts still count.
+
+Timeouts: each call is limited by `timeout_minutes` (15) and `max_turns`. The job is limited by `job_timeout_minutes` (120). The calls share that minus 15 minutes: a call gets what is left, at most `timeout_minutes`, and a call that cannot start any more counts as failed. So the job's own timeout, which would fail the check in either mode, is not reached by the calls.
+
+Inputs of `review.yml` for this, all optional:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `split_max_files` | 40 | more files than this: split |
+| `split_max_lines` | 3000 | more changed lines than this: split |
+| `split_max_calls` | 8 | most Claude calls for one review |
+| `split_max_diff_bytes` | 300000 | largest diff in one prompt |
+| `job_timeout_minutes` | 120 | timeout of the whole review job |
+
+Existing callers need no change: every earlier input keeps its name and default.
+
 ## Protected by instruction
 
 `protected_paths` (dev and followup workflows) hard-blocks the dev agent: a change to those files is discarded by `check-diff.sh`. `protected_review_paths` (review workflow) is for files the agent may change, but only when you said so for that issue. Callers pass it to `agent-review.yml`:
@@ -199,7 +265,7 @@ When the active milestone has 3 or fewer open issues, the backlog run opens `Pla
         cmd/via/*.go
 ```
 
-When an agent PR changes a matching file, the review looks on the linked issue for a comment written by `owner_login` that begins with `Owner decision` (leading blank space and Markdown heading or bold marks are allowed; case matters) and names the approved scope, for example `Owner decision: family.go may change, only the fallback order.` The phrase has to stand on its own: after it comes a colon, a space, a line break or the end of the comment. A comment starting `Owner decisions are pending` or `Owner decision-making` is not a decision.
+When a loop PR (the dev agent's) changes a matching file, the review looks on the linked issue for a comment written by `owner_login` that begins with `Owner decision` (leading blank space and Markdown heading or bold marks are allowed; case matters) and names the approved scope, for example `Owner decision: family.go may change, only the fallback order.` The phrase has to stand on its own: after it comes a colon, a space, a line break or the end of the comment. A comment starting `Owner decisions are pending` or `Owner decision-making` is not a decision.
 
 - **No such comment:** `review-protected.sh` posts a blocking review comment listing each file and the pattern that protects it, and fails the `agent-review` check. Claude is not asked.
 - **A comment exists:** the matched files and your comment go into the review prompt, and the reviewer blocks if the diff goes beyond the scope you named, saying which files and why.
@@ -217,7 +283,14 @@ Pattern syntax (`lib/glob.jq`), one per line, blank lines and `#` comments ignor
 
 Patterns are anchored at the repository root, match the whole path and are case-sensitive; a leading `./` or `/` is dropped. There are no `[classes]`, `{a,b}` or `!` negation. Renames count on both sides, so moving a file out of a protected directory is a change to it. A file name containing a quote, a backslash or a control character counts as protected.
 
-The check applies to agent PRs only: opened by you, not from a fork, on a head branch named `issue-N`, with the `agent-loop issue=N` marker in the body. The issue is the `N` of the branch name, which `publish-pr.sh` sets; the body is partly model text, so it is only checked for agreement (`scripts/review-gate.sh`). If the two disagree, or only one of them is there (an `issue-N` branch without the marker, a marker on another branch, a second marker naming another issue), the `agent-review` check fails rather than guessing. So do not name your own branches `issue-N`. Your other PRs and fork PRs pass straight through the review workflow as before. An empty `protected_review_paths` turns the feature off and nothing changes.
+The blocking check applies to loop PRs only: opened by you, not from a fork, on a head branch named `issue-N`, with the `agent-loop issue=N` marker in the body. The issue is the `N` of the branch name, which `publish-pr.sh` sets; the body is partly model text, so it is only checked for agreement (`scripts/review-gate.sh`). If the two disagree, or only one of them is there (an `issue-N` branch without the marker, a marker on another branch, a second marker naming another issue), the `agent-review` check fails rather than guessing. So do not name your own branches `issue-N`. Fork PRs and other people's PRs pass straight through the review workflow as before. An empty `protected_review_paths` turns the feature off and nothing changes.
+
+**On your own PRs (owner mode)** the rule is different, because the PR body may be model text and it is the body that names the linked issues:
+
+- An "Owner decision" comment never counts as approval and never suppresses anything.
+- Every protected file the PR changes is listed in the posted review, in its own "Protected paths" section, with the pattern that protects it. The section is written by `review-protected.sh` (`lib/glob.jq`, `owner_protected`), not by the model, from the same changed-file list as in loop mode (deletions, files moved out, mode-only changes and unusual names all count).
+- Next to the list the section quotes your comments beginning `Owner decision` found on the linked issues that were accepted as context (yours, not Release or Plan issues), each under its issue number, "for the owner to judge", or says that none was found. They are not checked against the diff.
+- The check never fails for this, and the loop's blocking comment is never posted. The reviewer is told to look at those files with extra care and that approval is your call.
 
 ## Adapting to another language
 
@@ -240,7 +313,7 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
+`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
 
 ## Known limits and residual risk
 
@@ -251,6 +324,12 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 - Release issues read the commit list through the compare API and open issues up to 500; planning reads the first 200 open issues.
 - A release issue is proposed from commit prefixes. Commits without a conventional prefix are listed but never raise the version.
 - Whether a diff stays inside an "Owner decision" scope is the review model's judgement. That a decision comment exists at all is checked by script.
+- The review of your own PRs is advisory by design: a `BLOCK` there does not stop a merge, and a review that failed looks like a passed check with a warning. Read the comment.
+- An owner PR's linked issues are chosen by its body, which your agent may have written. Only your own issues and comments can be pulled in that way, never anyone else's text.
+- A large PR is reviewed in parts by separate calls. Each sees the other parts' file names, not their diffs, so a problem that only shows across parts can be missed.
+- Split planning counts a rename as a deletion plus an addition, so a PR that moves many files is split sooner than its real size suggests.
+- A changed file whose name is not valid UTF-8 cannot be put into a split review: a loop PR with one fails the check, an owner PR lists it as not reviewed. A PR under the split thresholds is not affected.
+- The review job fails if the agent-loop checkout or the gate itself fails, before the mode is known. Past the gate, an owner PR cannot be failed by the review.
 - Cron times are UTC; Eastern times shift by an hour at DST.
 - `make golden-update` (or similar) lets the agent regenerate golden files. The review prompt checks for weakened tests, but read golden diffs yourself.
 - The fix round trusts CodeRabbit's comments as feedback. They are still treated as code feedback, never as instructions about credentials or CI.
