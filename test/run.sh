@@ -21,7 +21,8 @@ sel_in='{
   {"number": 8, "createdAt": "2026-01-08T00:00:00Z", "author": {"login": "tonhe"},    "labels": [{"name": "agent:ready"}]},
   {"number": 9, "createdAt": "2026-01-01T00:00:00Z", "author": {"login": "tonhe"},    "labels": []}
  ],
- "prs": [{"number": 100, "body": "Closes #7\n<!-- agent-loop issue=7 -->"}, {"number": 101, "body": null}]
+ "prs": [{"number": 100, "headRefName": "issue-7", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": "Closes #7\n<!-- agent-loop issue=7 -->"},
+         {"number": 101, "headRefName": "feat/x", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": null}]
 }'
 check "select: owner-only, skips in-progress/needs-human/open-PR, oldest first, max 3" \
   "[2,5,8]" "$(jq -c --arg owner tonhe --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
@@ -29,6 +30,58 @@ check "select: max respected" \
   "[2]" "$(jq -c --arg owner tonhe --argjson max 1 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
 check "select: other owner sees only their issue" \
   "[3]" "$(jq -c --arg owner mallory --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_in")"
+
+# ---------- pr.jq: which issue a PR belongs to (branch issue-N; the body marker only agrees or not) ----------
+pri() { jq -nc -L "$root/lib" --arg h "$1" --arg b "$2" 'include "pr"; {headRefName: $h, body: $b} | [branch_issue, pr_issue]'; }
+check "pr: branch issue-N and the same marker -> N, and they agree" "[36,36]" "$(pri issue-36 $'Fix.\n<!-- agent-loop issue=36 -->')"
+check "pr: the number is the branch's; a marker for another issue does not agree" "[36,null]" "$(pri issue-36 '<!-- agent-loop issue=77 -->')"
+check "pr: a second marker naming another issue does not agree" "[36,null]" "$(pri issue-36 $'agent-loop issue=77\n<!-- agent-loop issue=36 -->')"
+check "pr: the same marker twice still agrees" "[36,36]" "$(pri issue-36 $'agent-loop issue=36\n<!-- agent-loop issue=36 -->')"
+check "pr: a marker that only starts with the number does not agree" "[36,null]" "$(pri issue-36 '<!-- agent-loop issue=360 -->')"
+check "pr: no marker does not agree" "[36,null]" "$(pri issue-36 'Fix.')"
+check "pr: a marker on another branch names no issue" "[null,null]" "$(pri feat/x '<!-- agent-loop issue=36 -->')"
+check "pr: issue-0, leading zeros and longer names are not an issue branch" "[null,null]|[null,null]|[null,null]|[null,null]" \
+  "$(pri issue-0 'agent-loop issue=0')|$(pri issue-036 'agent-loop issue=36')|$(pri issue-36-rework 'agent-loop issue=36')|$(pri x/issue-36 'agent-loop issue=36')"
+check "pr: a newline in the branch name cannot smuggle an issue branch" "[null,null]" "$(pri $'x\nissue-36' 'agent-loop issue=36')"
+check "pr: an absurd number is not an issue" "[null,null]" "$(pri issue-99999999999999999999 'agent-loop issue=99999999999999999999')"
+check "pr: missing or null fields name no issue" "[null,null]|[null,null]" \
+  "$(jq -nc -L "$root/lib" 'include "pr"; {} | [branch_issue, pr_issue]')|$(jq -nc -L "$root/lib" 'include "pr"; {headRefName: null, body: null} | [branch_issue, pr_issue]')"
+check "pr: a null body on an issue branch -> the branch's number, no agreement" "[36,null]" "$(jq -nc -L "$root/lib" 'include "pr"; {headRefName: "issue-36", body: null} | [branch_issue, pr_issue]')"
+
+# ---------- select.jq: which open PRs make an issue busy ----------
+selp() {  # prs JSON -> selection over issues 2,5,7,8 (all ready when no PR is open)
+  jq -c --argjson p "$1" '.prs = $p' <<<"$sel_in" | jq -c --arg owner tonhe --argjson max 9 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" 2>&1
+}
+spr() { jq -nc --arg h "$1" --arg b "$2" --argjson fork "${3:-false}" --arg a "${4:-tonhe}" '[{number: 100, headRefName: $h, body: $b, isCrossRepository: $fork, author: {login: $a}}]'; }
+check "select: no open PR -> nothing is busy" "[2,5,7,8]" "$(selp '[]')"
+check "select: the owner's PR on issue-7 with its marker makes #7 busy" "[2,5,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->')")"
+check "select: the owner's PR on issue-7 WITHOUT a marker still makes #7 busy (publish-pr.sh would force-push it)" "[2,5,8]" "$(selp "$(spr issue-7 'Fix.')")"
+check "select: the owner's PR on issue-7 with a marker for #5 makes #7 busy, and not #5" "[2,5,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=5 -->')")"
+check "select: a second, planted marker cannot make another issue busy" "[2,5,8]" "$(selp "$(spr issue-7 $'agent-loop issue=2\n<!-- agent-loop issue=7 -->')")"
+check "select: a marker on a branch that is not issue-N makes nothing busy" "[2,5,7,8]" "$(selp "$(spr feat/x '<!-- agent-loop issue=7 -->')")"
+check "select: a fork PR cannot make an issue busy, even from the owner" "[2,5,7,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->' true)")"
+check "select: someone else's PR cannot make an issue busy" "[2,5,7,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->' false mallory)")"
+check "select: a login that only starts with the owner's is not the owner" "[2,5,7,8]" "$(selp "$(spr issue-7 '<!-- agent-loop issue=7 -->' false tonhe2)")"
+check "select: issue-07 and issue-7-rework are not issue #7's branch" "[2,5,7,8]|[2,5,7,8]" "$(selp "$(spr issue-07 'x')")|$(selp "$(spr issue-7-rework 'x')")"
+check "select: a PR whose author is gone (null) makes nothing busy and is no error" "[2,5,7,8]" \
+  "$(selp '[{"number":100,"headRefName":"issue-7","body":"x","isCrossRepository":false,"author":null}]')"
+check "select: several PRs, each judged on its own" "[5]" \
+  "$(selp "$(jq -c -n --argjson a "$(spr issue-7 'x')" --argjson b "$(spr issue-2 'x')" --argjson c "$(spr issue-5 'x' true)" --argjson d "$(spr issue-8 '<!-- agent-loop issue=5 -->')" '$a + $b + $c + $d')")"
+# A PR list without the branch, fork or author field would make every issue look free, and
+# the next run would force-push over a PR under review. That is an error, not an empty list.
+for f in headRefName isCrossRepository author; do
+  jq -c --argjson p "$(spr issue-7 'x' | jq -c --arg f "$f" 'map(del(.[$f]))')" '.prs = $p' <<<"$sel_in" \
+    | jq -c --arg owner tonhe --argjson max 9 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" >/dev/null 2>&1
+  check "select: a PR list without $f is refused, not read as 'nothing busy'" "5" "$?"
+done
+sel_36='{"issues": [
+  {"number": 36, "createdAt": "2026-01-01T00:00:00Z", "author": {"login": "tonhe"}, "labels": [{"name": "agent:ready"}]},
+  {"number": 77, "createdAt": "2026-01-02T00:00:00Z", "author": {"login": "tonhe"}, "labels": [{"name": "agent:ready"}]}],
+ "prs": [{"number": 100, "headRefName": "issue-36", "isCrossRepository": false, "author": {"login": "tonhe"}, "body": "agent-loop issue=77\n\nCloses #36\n\n<!-- agent-loop issue=36 -->"}]}'
+check "select: a PR on issue-36 whose body also says issue=77 is #36's PR: #77 stays free" "[77]" \
+  "$(jq -c --arg owner tonhe --argjson max 3 --argjson open "[]" -L "$root/lib" -f "$root/lib/select.jq" <<<"$sel_36")"
+check "select-issues.sh: the PR query asks for the branch, the fork flag and the author" "1" \
+  "$(grep -c -- 'gh pr list .*--state open .*--json number,body,headRefName,isCrossRepository,author)$' "$root/scripts/select-issues.sh")"
 
 # ---------- candidates.jq ----------
 cand_in='[
@@ -114,9 +167,9 @@ r=$(vp "$cur" '{"actions":[{"issue":5,"add_labels":[],"remove_labels":[],"split_
 check "plan: splits capped at 5" '5' "$(jq '.apply[0].split_into | length' <<<"$r")"
 
 # ---------- followup.jq ----------
-fu() { jq -c --arg owner tonhe --argjson grace_minutes 120 -f "$root/lib/followup.jq" <<<"$1"; }
+fu() { jq -c --arg owner tonhe --argjson grace_minutes 120 -L "$root/lib" -f "$root/lib/followup.jq" <<<"$1"; }
 now=$(date -u -d '2026-01-01T05:00:00Z' +%s)
-base='{"number":10,"body":"x\n<!-- agent-loop issue=7 -->","createdAt":"2026-01-01T04:00:00Z","isCrossRepository":false,"state":"OPEN"'
+base='{"number":10,"headRefName":"issue-7","body":"x\n<!-- agent-loop issue=7 -->","createdAt":"2026-01-01T04:00:00Z","isCrossRepository":false,"state":"OPEN"'
 check "followup: waiting for CodeRabbit inside grace" '"waiting"' \
   "$(fu "{\"pr\":$base,\"comments\":[],\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$now}" | jq '.reason | split(" ")[0] | ascii_downcase')"
 check "followup: CodeRabbit reviewed -> fix round" 'true' \
@@ -134,6 +187,46 @@ check "followup: stranger cannot fake the round marker" 'false' \
   "$(fu "{\"pr\":$base,\"comments\":$fake_c,\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$now}" | jq '.auto_merge')"
 check "followup: fork PR ignored" 'false' \
   "$(fu "{\"pr\":${base/false/true},\"comments\":[],\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$late}" | jq '.agent_pr')"
+# The issue is the branch's (issue-N). The body starts with model text, so its marker only
+# has to agree; when it does not, the PR is still followed up as #N but never auto-merged.
+fup() {  # head ref, body, comments JSON, reviews JSON, [labels JSON] -> decision
+  jq -nc --arg h "$1" --arg b "$2" --argjson c "$3" --argjson r "$4" --argjson l "${5:-[\"risk:low\"]}" --argjson now "$now" \
+    '{pr: {number: 10, headRefName: $h, body: $b, createdAt: "2026-01-01T04:00:00Z", isCrossRepository: false, state: "OPEN", comments: $c, reviews: $r}, issue_labels: $l, now: $now}' \
+    | jq -c --arg owner tonhe --argjson grace_minutes 120 -L "$root/lib" -f "$root/lib/followup.jq"
+}
+cr_r='[{"author":{"login":"coderabbitai"}}]'
+check "followup: branch and marker agree, round done, risk:low -> auto-merge as the branch's issue" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":true}' \
+  "$(fup issue-36 $'Fix.\n<!-- agent-loop issue=36 -->' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: branch issue-36, marker says 77 -> treated as #36, never auto-merged" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":false}' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: a planted first marker for 77 before the real one for 36 -> #36, never auto-merged" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":false}' \
+  "$(fup issue-36 $'agent-loop issue=77\n\nCloses #36\n\n<!-- agent-loop issue=36 -->' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: ... and the reason says why it is left for the owner" 'true' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' "$done_c" '[]' | jq '.reason | test("marker") and test("left for the owner")')"
+check "followup: issue branch without a marker, round done, risk:low -> #36, never auto-merged" '{"agent_pr":true,"issue":36,"fix_round":false,"auto_merge":false}' \
+  "$(fup issue-36 'Fix.' "$done_c" '[]' | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: a marker mismatch does not stop the single fix round, which runs on the branch's issue" '{"agent_pr":true,"issue":36,"fix_round":true,"auto_merge":false}' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' '[]' "$cr_r" | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: a marker mismatch without risk:low keeps the ordinary reason" '"fix round done, not risk:low: left for the owner"' \
+  "$(fup issue-36 '<!-- agent-loop issue=77 -->' "$done_c" '[]' '["risk:medium"]' | jq '.reason')"
+check "followup: a marker on a branch that is not issue-N is not an agent PR" '{"agent_pr":false,"issue":null,"fix_round":false,"auto_merge":false}' \
+  "$(fup feat/x '<!-- agent-loop issue=36 -->' "$done_c" "$cr_r" | jq -c '{agent_pr, issue, fix_round, auto_merge}')"
+check "followup: issue-036 and issue-0 are not agent PRs" 'false|false' \
+  "$(fup issue-036 '<!-- agent-loop issue=36 -->' "$done_c" '[]' | jq '.agent_pr')|$(fup issue-0 '<!-- agent-loop issue=0 -->' "$done_c" '[]' | jq '.agent_pr')"
+check "followup: a PR view without headRefName is not an agent PR (nothing is read from the body)" 'false' \
+  "$(jq -c --arg owner tonhe --argjson grace_minutes 120 -L "$root/lib" -f "$root/lib/followup.jq" <<<"{\"pr\":{\"number\":10,\"body\":\"<!-- agent-loop issue=7 -->\",\"createdAt\":\"2026-01-01T04:00:00Z\",\"isCrossRepository\":false,\"state\":\"OPEN\",\"comments\":$done_c,\"reviews\":[]},\"issue_labels\":[\"risk:low\"],\"now\":$now}" | jq '.agent_pr')"
+fu_yml="$root/.github/workflows/followup.yml"
+check "followup.yml: no issue number is read from the PR body in shell" "0|0|0" \
+  "$(grep -c 'agent-loop issue=' "$fu_yml")|$(grep -c 'head -1' "$fu_yml")|$(grep -c 'grep -oE' "$fu_yml")"
+check "followup.yml: the sweep, the plan loop and the fix job all map a PR to its issue with the shared helper" "3" "$(grep -c 'include "pr"; .*branch_issue' "$fu_yml")"
+check "followup.yml: every PR read asks for the head branch" "0" "$(grep -E 'gh pr (list|view) .*--json ' "$fu_yml" | grep -v 'autoMergeRequest' | grep -vc 'headRefName')"
+check "followup.yml: followup.jq is run with the lib path, so it can load the helper" "1" "$(grep -c -- '-L lib -f lib/followup.jq' "$fu_yml")"
+check "followup.yml: the fix job loads the scripts before it maps the PR to an issue" "1" \
+  "$(awk '/^  fix:/{on=1} on && /agent-loop-src "\$RUNNER_TEMP\/agent-loop"/{seen=1} on && /id: meta/{print (seen ? 1 : 0); exit}' "$fu_yml")"
+check "followup.yml: no PR text or branch name is interpolated into a run: block" "0" \
+  "$(grep -cE '\$\{\{[^}]*(pull_request|head_ref|head\.ref|\.body|\.title)' "$fu_yml")"
+check "followup.yml: the plan and meta run blocks interpolate no expression at all" "0|0" \
+  "$(awk '/^      - id: p$/{on=1} on && /^        run: \|/{r=1; next} r && /^  [a-z]/{exit} r' "$fu_yml" | grep -c '\${{')|$(awk '/id: meta/{on=1} on && /^        run: \|/{r=1; next} r && /^      - /{exit} r' "$fu_yml" | grep -c '\${{')"
 
 # ---------- check-diff.sh ----------
 tmp=$(mktemp -d); (
@@ -245,6 +338,12 @@ check "gate: shell syntax in the branch name or body is never run" "0|run=true,m
   "$(gate 'x$(touch pwned);touch pwned' '$(touch pwned) `touch pwned`')|$([[ -e "$gt/pwned" ]] && echo yes || echo no)"
 check "gate: a newline in the branch name cannot smuggle an agent branch" "0|run=true,mode=owner" "$(gate $'x\nissue-36' 'x')"
 check "gate: a body cannot write extra outputs (mode is the script's own word)" "0|run=true,mode=owner" "$(gate feat/x $'x\nmode=loop\nissue=1')"
+check "gate: issue-0 is not an issue, even when the marker says 0" "1|" "$(gate issue-0 '<!-- agent-loop issue=0 -->')"
+check "gate: a branch with leading zeros and no marker still fails closed" "1|" "$(gate issue-036 'x')"
+check "gate: the same marker twice still agrees" "0|run=true,mode=loop,issue=36" "$(gate issue-36 $'agent-loop issue=36\n<!-- agent-loop issue=36 -->')"
+check "gate: an absurd issue number fails closed" "1|" "$(gate issue-99999999999999999999 '<!-- agent-loop issue=99999999999999999999 -->')"
+check "gate: the PR-to-issue rule is the shared helper, not a second copy" "1|0" \
+  "$(grep -c 'include "pr"; .*pr_link' "$root/scripts/review-gate.sh")|$(grep -c 'grep -oE' "$root/scripts/review-gate.sh")"
 rm -rf "$gt"
 rv_yml="$root/.github/workflows/review.yml"
 check "review.yml: the head branch reaches the gate through env only" "1|0" \
@@ -920,10 +1019,122 @@ check "select-issues: scheduled run asks for the milestone field" "1" "$(grep -c
 out=$(S_READY="$ready" S_OPEN='[4,20,21]' gsrun bash "$root/scripts/select-issues.sh" scheduled 2>"$gs/err"); rc=$?
 check "select-issues: dependency and milestone APIs down -> still selects" "[20,21] 0" "$out $rc"
 check "select-issues: ... with one warning each" "2" "$(grep -c '^::warning::' "$gs/err")"
+out=$(S_READY="$ready" S_OPEN='[20,21]' S_GRAPHQL='{"data":{"repository":{"issues":{"nodes":[]}}}}' S_MILESTONES='[]' \
+      S_PRS='[{"number":90,"headRefName":"issue-20","isCrossRepository":false,"author":{"login":"tonhe"},"body":"no marker, and agent-loop issue=21"},
+              {"number":91,"headRefName":"issue-21","isCrossRepository":true,"author":{"login":"mallory"},"body":"<!-- agent-loop issue=21 -->"}]' \
+      gsrun bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null)
+check "select-issues: the owner's open PR on issue-20 keeps #20 out; a stranger's fork PR does not keep #21 out" "[21]" "$out"
 : > "$gs/log"
 out=$(S_ISSUE='{"number":21,"state":"OPEN","author":{"login":"tonhe"},"labels":[]}' S_GRAPHQL="$dep21" gsrun bash "$root/scripts/select-issues.sh" manual 21 2>/dev/null)
 check "select-issues: manual run overrides a native blocker" "[21]" "$out"
 check "select-issues: manual run never asks for dependencies" "0" "$(grep -c 'graphql' "$gs/log")"
+
+# ---------- wait-backlog.sh: a scheduled dev run waits for a running backlog run ----------
+# Own gh stub: call N prints line N of $WB/answers (the last line repeats); a line FAIL
+# makes that call fail. sleep is stubbed too, so no test waits for real.
+wb=$(mktemp -d); mkdir -p "$wb/bin"
+cat > "$wb/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "$*" >> "$WB/log"
+n=$(( $(cat "$WB/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WB/calls"
+total=$(grep -c '' "$WB/answers"); (( n > total )) && n=$total
+line=$(sed -n "${n}p" "$WB/answers")
+if [[ "$line" == FAIL ]]; then echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; fi
+printf '%s\n' "$line"
+GH
+cat > "$wb/bin/sleep" <<'SL'
+#!/usr/bin/env bash
+echo "$1" >> "$WB/sleeps"
+SL
+chmod +x "$wb/bin/gh" "$wb/bin/sleep"
+wbrun() {  # answers (one per line), then extra env assignments
+  printf '%s\n' "$1" > "$wb/answers"; shift
+  rm -f "$wb/calls" "$wb/out" "$wb/err"; : > "$wb/sleeps"; : > "$wb/log"
+  env PATH="$wb/bin:$PATH" WB="$wb" GITHUB_REPOSITORY=o/r GITHUB_OUTPUT="$wb/out" WAIT_MINUTES=2 WAIT_INTERVAL=30 "$@" \
+    bash "$root/scripts/wait-backlog.sh" 2>"$wb/err"
+}
+wbout() { grep "^$1=" "$wb/out" 2>/dev/null | cut -d= -f2-; }
+done_run='{"status":"completed","databaseId":1}'
+busy='[{"status":"in_progress","databaseId":2},'"$done_run"']'
+queued='[{"status":"queued","databaseId":2}]'
+idle="[$done_run]"
+
+out=$(wbrun "$idle"); rc=$?
+check "wait-backlog: no backlog run -> no wait, exit 0" "0|0|0" "$rc|$(grep -c '' "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: no backlog run -> says so, nothing for the digest" "1|" "$(grep -c 'No backlog run in progress' <<<"$out")|$(wbout note)"
+check "wait-backlog: asks for the caller's workflow in this repository" "1" \
+  "$(grep -c -- '^run list -R o/r --workflow agent-backlog.yml .*--json status' "$wb/log")"
+out=$(wbrun '[]'); rc=$?
+check "wait-backlog: workflow that never ran -> no wait" "0|0" "$rc|$(wbout waited)"
+out=$(wbrun "$idle" BACKLOG_WORKFLOW=triage.yml)
+check "wait-backlog: workflow file name comes from BACKLOG_WORKFLOW" "1" "$(grep -c -- '--workflow triage.yml ' "$wb/log")"
+
+out=$(wbrun "$busy"$'\n'"$busy"$'\n'"$idle"); rc=$?
+check "wait-backlog: run in progress that finishes -> waits, then continues" "0|30,30|60" \
+  "$rc|$(paste -sd, "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: ... and tells the log and the digest how long" "1|Waited 60 s for a backlog run to finish before selecting issues." \
+  "$(grep -c 'Waited 60 s' <<<"$out")|$(wbout note)"
+out=$(wbrun "$queued"$'\n'"$idle"); rc=$?
+check "wait-backlog: a queued run counts as running" "0|30" "$rc|$(wbout waited)"
+out=$(wbrun '[{"status":"pending","databaseId":3}]'$'\n'"$idle")
+check "wait-backlog: so does one held back by its concurrency group (pending)" "30" "$(wbout waited)"
+
+out=$(wbrun "$busy"); rc=$?
+check "wait-backlog: cap reached -> stops waiting, exit 0" "0|4|120" "$rc|$(grep -c '' "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: cap reached -> says so in the log, as a warning and in the digest" \
+  "1|1|A backlog run was still going after 120 s; issues were selected anyway." \
+  "$(grep -c 'still going after 120 s' <<<"$out")|$(grep -c '^::warning::' "$wb/err")|$(wbout note)"
+out=$(wbrun "$busy" WAIT_MINUTES=1 WAIT_INTERVAL=45)
+check "wait-backlog: never sleeps past the cap" "45,15|60" "$(paste -sd, "$wb/sleeps")|$(wbout waited)"
+
+out=$(wbrun FAIL); rc=$?
+check "wait-backlog: gh failing (e.g. no actions: read) -> no wait, exit 0" "0|0|0" "$rc|$(grep -c '' "$wb/sleeps")|$(wbout waited)"
+check "wait-backlog: ... with a warning that names the permission" "1" "$(grep -c '^::warning::.*actions: read' "$wb/err")"
+out=$(wbrun 'not json'); rc=$?
+check "wait-backlog: unusable answer -> warning, no wait, exit 0" "0|0|1" "$rc|$(grep -c '' "$wb/sleeps")|$(grep -c '^::warning::' "$wb/err")"
+out=$(wbrun "$busy"$'\n'FAIL); rc=$?
+check "wait-backlog: gh failing during the wait -> stops waiting, exit 0" "0|30|1" "$rc|$(wbout waited)|$(grep -c '^::warning::' "$wb/err")"
+check "wait-backlog: ... and the digest says the wait was cut short" \
+  "Waited 30 s for a backlog run, then could not read its state; issues were selected anyway." "$(wbout note)"
+
+out=$(wbrun "$busy" WAIT_MINUTES=0); rc=$?
+check "wait-backlog: cap 0 switches the wait off without asking GitHub" "0|0|0" "$rc|$(grep -c '' "$wb/log" 2>/dev/null)|$(wbout waited)"
+out=$(wbrun "$busy" WAIT_MINUTES=abc); rc=$?
+check "wait-backlog: unusable cap -> the default 15 minutes, with a warning" "0|900|1" "$rc|$(wbout waited)|$(grep -c '^::warning::.*WAIT_MINUTES' "$wb/err")"
+out=$(wbrun ''); rc=$?
+check "wait-backlog: empty answer -> warning, no wait, exit 0" "0|0|1" "$rc|$(wbout waited)|$(grep -c '^::warning::' "$wb/err")"
+out=$(wbrun "$busy" WAIT_MINUTES=600); rc=$?
+check "wait-backlog: cap above the limit is cut to 20 minutes" "0|1200" "$rc|$(wbout waited)"
+out=$(wbrun "$busy" WAIT_INTERVAL=0); rc=$?
+check "wait-backlog: unusable interval -> the default 30 seconds, not a busy loop" "0|30,30,30,30" "$rc|$(paste -sd, "$wb/sleeps")"
+out=$(wbrun "$idle" BACKLOG_WORKFLOW=); rc=$?
+check "wait-backlog: empty workflow name -> agent-backlog.yml" "1" "$(grep -c -- '--workflow agent-backlog.yml ' "$wb/log")"
+printf '%s\n' "$idle" > "$wb/answers"; rm -f "$wb/calls"
+out=$(env -u GITHUB_OUTPUT PATH="$wb/bin:$PATH" WB="$wb" GITHUB_REPOSITORY=o/r bash "$root/scripts/wait-backlog.sh" 2>/dev/null); rc=$?
+check "wait-backlog: runs without GITHUB_OUTPUT" "0|1" "$rc|$(grep -c 'No backlog run in progress' <<<"$out")"
+rm -rf "$wb"
+
+devyml="$root/.github/workflows/dev.yml"
+wait_step=$(awk '/^      - /{blk=""} {blk=blk $0 "\n"} /scripts\/wait-backlog\.sh/{printf "%s", blk}' "$devyml")
+check "dev.yml: the wait runs for mode scheduled only (manual and urgent never wait)" "1" \
+  "$(grep -cE "^[[:space:]]*if: inputs\.mode == 'scheduled' && " <<<"$wait_step")"
+check "dev.yml: the wait step cannot fail the select job" "1" "$(grep -c 'continue-on-error: true' <<<"$wait_step")"
+check "dev.yml: the wait comes before the selection" "1" \
+  "$(awk '/scripts\/wait-backlog\.sh/{w=NR} /scripts\/select-issues\.sh/{s=NR} END{print (w && s && w < s) ? 1 : 0}' "$devyml")"
+check "dev.yml: the wait script is started with no expression in the command" "1|0" \
+  "$(grep -c 'scripts/wait-backlog\.sh' "$devyml")|$(grep 'scripts/wait-backlog\.sh' "$devyml" | grep -c '\${{')"
+check "dev.yml: backlog wait inputs only as inputs, in the step's if: and on env lines" "0" \
+  "$(grep -E 'backlog_workflow|backlog_wait_minutes' "$devyml" | grep -vcE '^[[:space:]]*(backlog_workflow:[[:space:]]+\{type: string, default: agent-backlog\.yml|backlog_wait_minutes:[[:space:]]+\{type: number, default: 15|if: inputs\.mode == .scheduled. && inputs\.backlog_wait_minutes > 0$|BACKLOG_WORKFLOW: \$\{\{ inputs\.backlog_workflow \}\}$|WAIT_MINUTES: \$\{\{ inputs\.backlog_wait_minutes \}\}$)')"
+check "dev.yml: both wait inputs reach the script" "1|1" \
+  "$(grep -c 'BACKLOG_WORKFLOW: \${{ inputs\.backlog_workflow }}' <<<"$wait_step")|$(grep -c 'WAIT_MINUTES: \${{ inputs\.backlog_wait_minutes }}' <<<"$wait_step")"
+check "dev.yml: the wait's outputs only on outputs: and env lines" "0" \
+  "$(grep 'steps\.wait\.outputs\|needs\.select\.outputs\.backlog_wait' "$devyml" | grep -vcE '^[[:space:]]*(backlog_wait_note|WAIT_NOTE): \$\{\{ ')"
+check "dev.yml: the digest is given the wait note" "1" "$(grep -c 'WAIT_NOTE: \${{ needs\.select\.outputs\.backlog_wait_note }}' "$devyml")"
+sel_timeout=$(awk '/^  select:/{f=1} f && /timeout-minutes:/{print $2; exit}' "$devyml")
+max_wait=$(sed -n 's/^max_minutes=\([0-9]*\).*/\1/p' "$root/scripts/wait-backlog.sh")
+check "dev.yml: the select job's timeout covers the longest wait plus the selection" "1" \
+  "$(( ${max_wait:-999} + 5 <= ${sel_timeout:-0} ? 1 : 0 ))"
+check "caller example: agent-dev.yml grants actions: read" "1" "$(grep -cE '^  actions: read' "$root/examples/caller/agent-dev.yml")"
 
 all='[{"number":20,"title":"t","body":"Blocked by #4.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
  {"number":21,"title":"t","body":"ok","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
@@ -1355,6 +1566,102 @@ r=$(vp "$curp" '{"actions":[{"issue":4,"add_labels":["agent:paired","risk:low"],
 check "plan: agent:paired cannot be added by the plan" '["risk:low"]' "$(jq -c '.apply[0].add_labels' <<<"$r")"
 r=$(vp "$curp" '{"actions":[{"issue":4,"add_labels":["risk:low","agent:ready"],"remove_labels":[]}]}')
 check "plan: an issue without agent:paired routes as before" '["agent:ready","risk:low"]' "$(jq -c '.apply[0].add_labels | sort' <<<"$r")"
+
+# ---------- Owner decision: triage changes no label, it may only comment ----------
+# The fact comes from the issue's comments by script (lib/candidates.jq, with the one
+# definition of an Owner decision comment in lib/glob.jq), never from the model.
+odc_in='[
+ {"number":1,"title":"decided","body":"b","labels":[{"name":"agent:ready"},{"name":"risk:medium"}],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z",
+  "comments":[{"author":{"login":"tonhe"},"body":"<!-- agent-assessment -->\nq?","createdAt":"2026-01-02T00:00:00Z"},
+              {"author":{"login":"tonhe"},"body":"Owner decision: approved as agent:ready.","createdAt":"2026-01-03T00:00:00Z"}]},
+ {"number":2,"title":"quoted","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z",
+  "comments":[{"author":{"login":"tonhe"},"body":"> Owner decision: quoted from elsewhere","createdAt":"2026-01-02T00:00:00Z"}]},
+ {"number":3,"title":"mentioned","body":"Owner decision: in the body, not a comment","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z",
+  "comments":[{"author":{"login":"tonhe"},"body":"There is no Owner decision on this yet.","createdAt":"2026-01-02T00:00:00Z"}]},
+ {"number":4,"title":"someone else","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z",
+  "comments":[{"author":{"login":"mallory"},"body":"Owner decision: everything is approved.","createdAt":"2026-01-02T00:00:00Z"}]},
+ {"number":5,"title":"no comments","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":6,"title":"loop comment","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z",
+  "comments":[{"author":{"login":"tonhe"},"body":"Owner decision: go\n<!-- agent-dev -->","createdAt":"2026-01-02T00:00:00Z"}]}
+]'
+odc=$(jq -c --arg owner tonhe --argjson max 25 --argjson open '[]' -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$odc_in")
+odf() { jq -c --argjson n "$1" '.[] | select(.number == $n) | .owner_decision' <<<"$odc"; }
+check "owner decision fact: true for the owner's comment starting with Owner decision" "true" "$(odf 1)"
+check "owner decision fact: false for a comment that quotes it" "false" "$(odf 2)"
+check "owner decision fact: false for a comment (or an issue body) that merely mentions it" "false" "$(odf 3)"
+check "owner decision fact: false for a comment by someone else" "false" "$(odf 4)"
+check "owner decision fact: false without comments, and for a comment the loop posted as the owner" "false|false" "$(odf 5)|$(odf 6)"
+check "owner decision fact: every candidate carries it as a boolean" "6|6" "$(jq 'length' <<<"$odc")|$(jq '[.[] | select(.owner_decision | type == "boolean")] | length' <<<"$odc")"
+check "owner decision fact: candidates.jq uses the definition in lib/glob.jq, not a second one" "1|0" \
+  "$(grep -c 'owner_decisions(\$owner)' "$root/lib/candidates.jq")|$(grep -c 'def owner_decisions' "$root/lib/candidates.jq")"
+
+vpd() { jq -c --argjson allowed '[1,2,3,4,5]' --argjson current "$1" --argjson allow_medium "${4:-false}" --argjson decided "$3" -f "$root/lib/validate-plan.jq" <<<"$2"; }
+curd='{"1":["agent:ready","risk:medium"],"2":[],"3":["needs:human"],"4":[],"5":[]}'
+r=$(vpd "$curd" '{"actions":[{"issue":1,"add_labels":["needs:human"],"remove_labels":["agent:ready"],"assessment":"a","question":"q"}]}' '[1,2,3]')
+check "plan: a decided issue gets no label added and none removed" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+check "plan: ... assessment and question kept, and the reason noted" 'a|q|1' \
+  "$(jq -r '.apply[0].assessment' <<<"$r")|$(jq -r '.apply[0].question' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("Owner decision"))] | length' <<<"$r")"
+check "plan: ... the action is applied, not rejected" '1|0' "$(jq '.apply | length' <<<"$r")|$(jq '.rejected | length' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":2,"add_labels":["risk:low","type:bug"],"remove_labels":[],"assessment":"a"}]}' '[1,2,3]')
+check "plan: risk and type labels are frozen too on a decided issue (unlike agent:paired)" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":2,"add_labels":["risk:low","agent:ready"],"remove_labels":[]}]}' '[1,2,3]')
+check "plan: agent:ready is not added to a decided issue even at low risk" '[]' "$(jq -c '.apply[0].add_labels' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":2,"add_labels":["risk:high","agent:ready"],"remove_labels":[]}]}' '[1,2,3]')
+check "plan: the risk gate does not add needs:human to a decided issue" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":1,"add_labels":["agent:ready"],"remove_labels":[]}]}' '[1,2,3]')
+check "plan: ... nor when the issue's own risk label would refuse agent:ready" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":3,"add_labels":["risk:low","agent:ready"],"remove_labels":["needs:human"]}]}' '[1,2,3]')
+check "plan: existing needs:human on a decided issue is left alone" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":2,"add_labels":[],"remove_labels":[],"assessment":"a","split_into":[{"title":"a","body":"b"},{"title":"c","body":"d"}]}]}' '[1,2,3]')
+check "plan: a decided issue is not split, and the note says why" '[]|1' "$(jq -c '.apply[0].split_into' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("Owner decision"))] | length' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":2,"add_labels":["admin"],"remove_labels":[],"assessment":"a"}]}' '[1,2,3]')
+check "plan: an unmanaged label on a decided issue is dropped like the rest" '[]' "$(jq -c '.apply[0].add_labels' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":2,"add_labels":[],"remove_labels":[],"assessment":"a"}]}' '[1,2,3]')
+check "plan: a decided issue with nothing proposed gets its assessment and no note" 'a|[]' "$(jq -r '.apply[0].assessment' <<<"$r")|$(jq -c '.apply[0].notes' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":1,"add_labels":["needs:human"],"remove_labels":["agent:ready"],"assessment":"a"},
+                             {"issue":4,"add_labels":["risk:low","type:bug","agent:ready"],"remove_labels":[],"assessment":"b","split_into":[{"title":"t","body":"b"}]},
+                             {"issue":5,"add_labels":["risk:high","agent:ready"],"remove_labels":[]}]}' '[1,2,3]')
+check "plan: an undecided issue in the same plan is handled as before" '["agent:ready","risk:low","type:bug"]|1|0' \
+  "$(jq -c '.apply[1].add_labels | sort' <<<"$r")|$(jq '.apply[1].split_into | length' <<<"$r")|$(jq '[.apply[1].notes[] | select(contains("Owner decision"))] | length' <<<"$r")"
+check "plan: ... and the risk gate still fires for it" '["needs:human","risk:high"]' "$(jq -c '.apply[2].add_labels | sort' <<<"$r")"
+check "plan: ... while the decided one next to it stays untouched" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpd "$curd" '{"actions":[{"issue":99,"add_labels":["risk:low"],"remove_labels":[]}]}' '[99]')
+check "plan: a decided issue outside the allowed set is still rejected" '[99]' "$(jq -c '[.rejected[].issue]' <<<"$r")"
+r=$(vp "$curd" '{"actions":[{"issue":1,"add_labels":["needs:human"],"remove_labels":["agent:ready"]}]}')
+check "plan: without the decided argument nothing is frozen" '{"add":["needs:human"],"rm":["agent:ready"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+
+# End to end, a real (not dry) run: candidates.json comes from candidates.jq, so the path
+# is comment -> fact -> validated plan -> gh calls. Issue 1 is the case from the report:
+# the owner approved it as agent:ready and the plan wants needs:human instead.
+odw=$(mktemp -d); mkdir -p "$odw/bin" "$odw/w/claude"
+cat > "$odw/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GHLOG"
+case "$1 $2" in
+  "issue edit")    echo "https://github.com/o/r/issues/$3" ;;
+  "issue comment") echo "https://github.com/o/r/issues/$3#issuecomment-1" ;;
+  "issue create")  echo "https://github.com/o/r/issues/900" ;;
+esac
+GH
+chmod +x "$odw/bin/gh"
+echo "$odc" > "$odw/w/candidates.json"
+echo '{"1":["agent:ready","risk:medium"],"2":[],"3":[],"4":[],"5":[],"6":[]}' > "$odw/w/current-labels.json"
+echo '[]' > "$odw/w/external.json"
+echo '{"summary":"s","actions":[
+  {"issue":1,"add_labels":["needs:human","type:bug"],"remove_labels":["agent:ready"],"assessment":"still looks risky","split_into":[{"title":"child","body":"part"}]},
+  {"issue":2,"add_labels":["risk:low","type:docs","agent:ready"],"remove_labels":[],"assessment":"fine"}]}' > "$odw/w/claude/result.json"
+out=$(PATH="$odw/bin:$PATH" GHLOG="$odw/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe DRY_RUN=false bash "$root/scripts/apply-backlog.sh" "$odw/w" 2>/dev/null); rc=$?
+check "apply (owner decision): exit 0 and the decided issue number reaches validate-plan.jq" "0|[]|[]" \
+  "$rc|$(jq -c '.apply[0].add_labels' "$odw/w/validated.json" 2>/dev/null)|$(jq -c '.apply[0].remove_labels' "$odw/w/validated.json" 2>/dev/null)"
+check "apply (owner decision): no issue edit for the decided issue, no sub-issue filed" "0|0" "$(grep -c '^issue edit 1 ' "$odw/log")|$(grep -c '^issue create ' "$odw/log")"
+check "apply (owner decision): the assessment comment is posted on it" "1|1" "$(grep -c '^issue comment 1 ' "$odw/log")|$(grep -c '^still looks risky$' "$odw/log")"
+check "apply (owner decision): ... with a guardrail note" "1" "$(grep -c '^- .*Owner decision' "$odw/log")"
+check "apply (owner decision): the undecided issue (a quoted mention) is labeled as before" "1" "$(grep -c '^issue edit 2 -R o/r --add-label agent:ready,risk:low,type:docs$' "$odw/log")"
+check "apply (owner decision): the digest says assessed, with no label change" "1|1" "$(grep -c '^- #1 assessed$' <<<"$out")|$(grep -c '^- #2 +agent:ready,risk:low,type:docs$' <<<"$out")"
+rm -rf "$odw"
+check "backlog prompt: names the owner_decision fact and says such an issue only gets a comment" "1|1" \
+  "$(grep -c 'has `owner_decision: true`' "$root/prompts/backlog.md")|$(grep -c 'Leave `add_labels`, `remove_labels` and `split_into` empty' "$root/prompts/backlog.md")"
+check "readme: the rule is listed under the guardrails" "1" "$(grep -c '^| Triage never changes a label on an issue with an "Owner decision" comment' "$root/README.md")"
 
 # ---------- triage can never set a milestone ----------
 check "schema: the plan schema offers no milestone field anywhere" "0" \

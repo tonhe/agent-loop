@@ -45,18 +45,20 @@ jobs:
           GRACE: ${{ inputs.grace_minutes }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        # A PR's issue is the N of its head branch issue-N (lib/pr.jq), never a number read
+        # from the PR body: the body starts with model text. PR data reaches jq on stdin.
         run: |
           if [[ -n "$PR_INPUT" ]]; then prs="$PR_INPUT"
-          else prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --author "$OWNER_LOGIN" --limit 50 --json number,body \
-                       --jq '.[] | select(.body | test("agent-loop issue=[0-9]+")) | .number'); fi
+          else prs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --author "$OWNER_LOGIN" --limit 50 --json number,headRefName \
+                       | jq -r -L lib 'include "pr"; .[] | select(branch_issue != null) | .number'); fi
           fix='[]'; merged=()
           for pr in $prs; do
-            view=$(gh pr view "$pr" -R "$GITHUB_REPOSITORY" --json number,body,createdAt,isCrossRepository,state,comments,reviews,author)
+            view=$(gh pr view "$pr" -R "$GITHUB_REPOSITORY" --json number,headRefName,body,createdAt,isCrossRepository,state,comments,reviews,author)
             [[ $(jq -r '.author.login' <<<"$view") == "$OWNER_LOGIN" ]] || continue
-            issue=$(jq -r '.body' <<<"$view" | grep -oE 'agent-loop issue=[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+            issue=$(jq -r -L lib 'include "pr"; branch_issue // empty' <<<"$view")
             labels='[]'; [[ -n "$issue" ]] && labels=$(gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name]')
             d=$(jq -n --argjson pr "$view" --argjson l "$labels" --argjson now "$(date +%s)" '{pr: $pr, issue_labels: $l, now: $now}' \
-                | jq -c --arg owner "$OWNER_LOGIN" --argjson grace_minutes "$GRACE" -f lib/followup.jq)
+                | jq -c --arg owner "$OWNER_LOGIN" --argjson grace_minutes "$GRACE" -L lib -f lib/followup.jq)
             echo "PR #$pr: $(jq -r .reason <<<"$d")"
             if [[ $(jq -r .fix_round <<<"$d") == true ]]; then fix=$(jq -c --argjson p "$pr" '. + [$p]' <<<"$fix"); fi
             if [[ $(jq -r .auto_merge <<<"$d") == true && "$AUTO_MERGE" == true ]]; then
@@ -84,20 +86,26 @@ jobs:
       PR: ${{ matrix.pr }}
       OWNER_LOGIN: ${{ inputs.owner_login }}
     steps:
+      # The scripts are loaded first: the step below needs lib/pr.jq.
+      - uses: actions/checkout@v4
+        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
+      - run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
+
+      # The issue is the N of the head branch issue-N (lib/pr.jq), not a number from the
+      # PR body. Both outputs are built from that number, so no PR text reaches an output.
       - name: Find branch and mark the round used (before running, so it can never loop)
         id: meta
         env: {GH_TOKEN: "${{ github.token }}"}
         run: |
           v=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefName,body)
-          echo "branch=$(jq -r .headRefName <<<"$v")" >> "$GITHUB_OUTPUT"
-          echo "issue=$(jq -r .body <<<"$v" | grep -oE 'agent-loop issue=[0-9]+' | head -1 | grep -oE '[0-9]+')" >> "$GITHUB_OUTPUT"
+          issue=$(jq -r -L "$RUNNER_TEMP/agent-loop/lib" 'include "pr"; branch_issue // empty' <<<"$v")
+          if [[ -z "$issue" ]]; then echo "::error::PR #$PR is not on an agent branch (issue-N); no fix round."; exit 1; fi
+          echo "branch=issue-$issue" >> "$GITHUB_OUTPUT"
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
           gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "<!-- agent-fix-round -->Agent fix round started: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
       - uses: actions/checkout@v4
         with: {ref: "${{ steps.meta.outputs.branch }}", persist-credentials: false, fetch-depth: 1}
-      - uses: actions/checkout@v4
-        with: {repository: "${{ inputs.loop_repo }}", ref: "${{ inputs.loop_ref }}", path: .agent-loop-src, persist-credentials: false}
-      - run: mv .agent-loop-src "$RUNNER_TEMP/agent-loop"
       - if: inputs.go_version_file != ''
         uses: actions/setup-go@v5
         with: {go-version-file: "${{ inputs.go_version_file }}"}

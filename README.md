@@ -33,6 +33,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Backlog manager can't do anything directly | Read-only tools; returns JSON that `lib/validate-plan.jq` filters |
 | `agent:ready` only for `risk:low`; human-set labels kept; `agent:urgent` untouchable | `lib/validate-plan.jq` |
 | `agent:paired` issues are never picked by the nightly dev run and never re-routed or split by triage; the label cannot be added or removed by the plan | `lib/select.jq`, `lib/validate-plan.jq` |
+| Triage never changes a label on an issue with an "Owner decision" comment (yours, starting with `Owner decision`; the same test as for protected paths): no label added or removed, routing, risk and type alike, and no split. It may only post its assessment | `lib/candidates.jq` records the fact from the comments (`owner_decision`, using `owner_decisions` in `lib/glob.jq`); `apply-backlog.sh` passes it on; `lib/validate-plan.jq` drops the changes |
 | Triage can never set a milestone | `schemas/backlog-plan.json` has no such field; `lib/validate-plan.jq` builds its output field by field, so one smuggled in is dropped; `apply-backlog.sh` never passes one to `gh` |
 | Release issues only propose: never a tag, never a GitHub release, never a deployment approval | `release-issue.sh` only creates or edits one issue; PAT has no Deployments permission |
 | Only a Release issue the loop filed is ever edited (exact title, owner as author, `release` label and the `<!-- agent-release -->` marker); one you wrote by hand is left alone and not duplicated | `lib/release.jq` (`existing_release`, `handwritten_release`) |
@@ -42,13 +43,14 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | Release and Plan issues are never triaged or worked (their text is not yours) | `lib/meta.jq`, used by `lib/candidates.jq`, `lib/select.jq`, `select-issues.sh`, `issue-context.sh` |
 | Issues the model words (split children, found issues) cannot pass for a Release or Plan issue: a title starting `Release v…` or `Plan v…` gets `Re: ` in front, and no `<!-- agent-` marker survives in the body | `lib/meta.jq` (`safe_title`, `defang_markers`), `apply-backlog.sh`, `file-found.sh`; `lib/release.jq` and `lib/planning.jq` also require their own marker before treating an issue as theirs |
 | A loop PR touching a protected-by-instruction path needs your "Owner decision" comment on the issue | `review-protected.sh`, `lib/glob.jq` block without the model; the reviewer judges scope when a decision exists |
-| The model cannot choose which issue a loop PR is reviewed against | `review-gate.sh` takes the number from the head branch (`issue-N`, set by `publish-pr.sh`) and fails the check unless the body marker agrees; `publish-pr.sh` neutralises `agent-loop issue=` and HTML comments in the model's PR text; `issue-context.sh` refuses Release and Plan issues |
+| The model cannot choose which issue a loop PR belongs to: not for the review, not for follow-up and auto-merge, not for selection | One rule in `lib/pr.jq`: the number is the `N` of the head branch (`issue-N`, set by `publish-pr.sh`); the body marker can only agree or not. `review-gate.sh` fails the check unless it agrees. `lib/followup.jq` and `followup.yml` read the issue's labels and text by the branch's number, and never auto-merge when the marker is missing or names another issue. `publish-pr.sh` neutralises `agent-loop issue=` and HTML comments in the model's PR text; `issue-context.sh` refuses Release and Plan issues |
+| Only your own PR can keep an issue out of the nightly run | `lib/select.jq`: issue N counts as having an open PR only when a PR opened by `owner_login`, not from a fork, is on branch `issue-N`. The PR body is not read, so a missing or wrong marker never frees an issue whose branch would be force-pushed, and a stranger's PR never blocks one |
 | No network tools, no MCP, narrow Bash allowlist | `run-claude.sh` (`--tools`, `--allowedTools`, `--strict-mcp-config`, `--permission-mode dontAsk`) |
 | Token limits | `--max-turns`, wall-clock `timeout`, job `timeout-minutes`, max issues per run, model per job; a review is at most `split_max_calls` calls inside one shared time budget (`review-calls.sh`) |
 | Agent can't touch CI, Makefile, coverage floors | `check-diff.sh` (`.github/` always, plus `protected_paths`); PAT lacks Workflows permission |
 | "Done" means verified | Workflow re-runs `verify_command` itself in a step with no secrets |
 | Agent code never runs next to the PAT | Verify step has no secrets; publish step applies a patch in a fresh checkout with hooks disabled |
-| One fix round only | Marker comment posted before the round starts (`lib/followup.jq`) |
+| One fix round only | Marker comment posted before the round starts (`lib/followup.jq`); the round works on the issue of the PR's branch (`issue-N`, `lib/pr.jq`) |
 | Auto-merge can't skip checks | `enable-automerge.sh` refuses unless the PR's own base branch has required checks and an empty bypass list |
 | Releases need a human | `environment: release` with you as required reviewer; PAT has no Deployments permission |
 | Digest can't ping anyone | `discord.sh` sets `allowed_mentions.parse = []` |
@@ -69,6 +71,8 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 ## Per-repo setup
 
 1. Copy `examples/caller/*.yml` to the repo's `.github/workflows/` and change the lines marked `CHANGE`.
+   - `agent-dev.yml` needs `actions: read` under `permissions:` (the example has it). The nightly dev run uses it to see whether a backlog run is still going and waits for it. If you copied the callers before this was added, add the line; without it the run warns and starts without waiting.
+   - If your backlog caller is not named `agent-backlog.yml`, set `backlog_workflow: <file name>` in the `with:` block of `agent-dev.yml`. `backlog_wait_minutes` (default 15, at most 20) is the longest wait; `0` switches it off. See "Order of work".
 2. Secrets (`gh secret set NAME -R owner/repo`, paste when prompted):
    - `CLAUDE_CODE_OAUTH_TOKEN`
    - `AGENT_PAT`
@@ -179,6 +183,8 @@ Pick `type` when the backlog holds old feature or stretch issues: with `oldest` 
 
 `agent:paired` issues and the loop's own Release and Plan issues are never in the list.
 
+Before it selects, a run in mode `scheduled` checks for a run of the backlog workflow (`backlog_workflow`, default `agent-backlog.yml`) that has not finished, whether in progress, queued or held back, and waits for it, so it does not pick from labels that triage is about to change (`scripts/wait-backlog.sh`). It checks every 30 seconds for at most `backlog_wait_minutes` (default 15, at most 20; `0` = never wait), then selects either way. The digest says when a run waited and when it gave up waiting. Manual and urgent runs name their issue and never wait. If the runs cannot be listed (no `actions: read` in the caller, wrong file name, GitHub error), the run log carries a warning and selection starts at once.
+
 ## Release issues
 
 The backlog run looks at the commits on the default branch since the latest `vX.Y.Z` tag and, when a release is due, opens one issue titled `Release vX.Y.Z` (label `release`, assigned to `owner_login`). It proposes; you tag. `release-issue.sh` only creates or edits that issue. It never creates a tag, never creates a GitHub release and never approves a deployment.
@@ -232,7 +238,7 @@ Unchanged: the dev agent's PR is reviewed against its issue, a non-pass verdict 
 For the PRs you push yourself, including the ones your local or interactive agent opens under your login.
 
 - **Advisory, always.** The comment is headed `Agent review (advisory): PASS`, `BLOCK`, `... (INCOMPLETE)` or `NOT COMPLETED`, and the `agent-review` check ends in success whatever it says. A model must not be able to block your merge, so a Claude failure, a timeout, a result that is not a review, or an error in any review step also ends in success: the comment (or, if not even that can be posted, the run summary) says the review could not be completed, and the run carries a warning. `review-post.sh` exits 0 in owner mode and every review step runs under `advisory.sh`.
-- **One comment per PR.** The comment begins `<!-- agent-review-owner -->`. On each push the bot's existing comment with that marker is updated in place; a new one is created only when there is none. It says which commit it is for. The comment is found by marker and by author `github-actions[bot]`, so a comment of yours that quotes the marker is never overwritten. The followup workflow only handles PRs with the `agent-loop issue=N` marker, so it never sees an owner PR.
+- **One comment per PR.** The comment begins `<!-- agent-review-owner -->`. On each push the bot's existing comment with that marker is updated in place; a new one is created only when there is none. It says which commit it is for. The comment is found by marker and by author `github-actions[bot]`, so a comment of yours that quotes the marker is never overwritten. The followup workflow only handles PRs on an `issue-N` branch, so it never sees an owner PR.
 - **Linked issues as context.** Issue numbers are taken from the PR body: `Fixes #N`, `Closes #N`, `Resolves #N`, `Refs #N` (and `fix`, `fixed`, `close`, `closed`, `resolve`, `resolved`, `ref`), any case, an optional colon, number on the same line. Limits: `#N` of this repository only (`org/repo#5` and issue URLs are ignored), no leading zeros, duplicates count once, at most 5. Nothing else is read from the PR body, which your agent may have written: not its text, not its title. Each number goes through `issue-context.sh`: the issue is used only if you opened it and it is not a Release or Plan issue, and only your comments on it are included. Anything else is skipped with a line in the log. With no usable linked issue the PR is reviewed on its diff alone, and both the prompt and the comment say so.
 - **Protected paths.** Nothing is blocked and nothing is approved. See "Protected by instruction".
 - **Cost.** Every push to one of your PRs now runs at least one Claude call (several for a large PR, see below). The example caller cancels a running review when a new push arrives (`cancel-in-progress`), so only the latest push is reviewed to the end.
@@ -346,5 +352,6 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 - A changed file whose name is not valid UTF-8 cannot be put into a split review: a loop PR with one fails the check, an owner PR lists it as not reviewed. A PR under the split thresholds is not affected.
 - The review job fails if the agent-loop checkout or the gate itself fails, before the mode is known. Past the gate, an owner PR cannot be failed by the review.
 - Cron times are UTC; Eastern times shift by an hour at DST.
+- The nightly dev run waits for a backlog run that exists when it starts, for at most 20 minutes. A backlog run started after the selection, or one still going when the wait gives up, can still change labels under it. Only the newest 20 runs of the backlog workflow are looked at.
 - `make golden-update` (or similar) lets the agent regenerate golden files. The review prompt checks for weakened tests, but read golden diffs yourself.
 - The fix round trusts CodeRabbit's comments as feedback. They are still treated as code feedback, never as instructions about credentials or CI.

@@ -3,6 +3,7 @@
 # Args:   --argjson allowed [issue numbers sent to the agent]
 #         --argjson current {"<n>": [current label names]}
 #         --argjson allow_medium true|false
+#         --argjson decided [issue numbers with an "Owner decision" comment]   optional, default []
 # Output: {"apply": [...], "rejected": [{issue, reason}]}
 #
 # Rules enforced here (not in the prompt):
@@ -15,6 +16,10 @@
 #  - agent:paired (owned by the owner's interactive agent) freezes routing: agent:ready
 #    and needs:human are neither added nor removed and the issue is not split; the label
 #    itself is untouchable like agent:urgent. Risk/type labels and the assessment stay allowed.
+#  - an issue with an "Owner decision" comment ($decided, a fact from candidates.jq) keeps
+#    its labels exactly as they are: nothing is added or removed (routing, risk and type
+#    alike), the risk gate adds no needs:human, and the issue is not split. The assessment
+#    and the question are kept: triage may only comment.
 #  - nothing here can set a milestone: the output is built field by field, so a
 #    "milestone" (or any other extra field) in an action or a split child is dropped
 def managed: ["risk:low","risk:medium","risk:high",
@@ -22,9 +27,23 @@ def managed: ["risk:low","risk:medium","risk:high",
               "agent:ready","needs:human"];
 def prefix($p): map(select(startswith($p)));
 
-reduce (.actions // [])[] as $a ({apply: [], rejected: []};
+($ARGS.named.decided // []) as $decided
+| reduce (.actions // [])[] as $a ({apply: [], rejected: []};
   if ($allowed | index($a.issue)) == null then
     .rejected += [{issue: $a.issue, reason: "issue not in allowed set"}]
+  elif ($decided | index($a.issue)) != null then
+    # Owner decision: the owner's routing stands. None of the label rules below run.
+    .apply += [{
+      issue: $a.issue,
+      add_labels: [],
+      remove_labels: [],
+      assessment: ($a.assessment // null),
+      question: ($a.question // null),
+      split_into: [],
+      notes: (if (($a.add_labels // []) + ($a.remove_labels // []) + ($a.split_into // []) | length) > 0
+              then ["labels left alone and no split: the issue has an Owner decision comment, so triage only comments"]
+              else [] end)
+    }]
   else
     ($current[($a.issue | tostring)] // []) as $cur
     | ([($a.add_labels // [])[] | select(. as $l | managed | index($l) != null)]) as $add0
