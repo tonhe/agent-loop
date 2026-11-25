@@ -43,7 +43,7 @@ Each proposed sub-issue must stand on its own: a title, a body with context, and
 
 `agent:paired` means the owner's interactive agent owns the issue. Assess it and give it risk and type labels as usual, but do not route it: no `agent:ready`, no `needs:human`, no `split_into`. The script drops routing changes on these issues anyway.
 
-The same holds for a sub-issue of such an epic. An issue that has a number in `paired_parent` is a sub-issue of that open `agent:paired` epic, so the interactive agent owns it too. Assess it and give it risk and type labels, but do not route it: no `agent:ready`, no `needs:human`, no `split_into`. The script labels it `agent:paired` and drops routing changes and splits on it anyway; you never add or remove `agent:paired` yourself.
+The same holds for a sub-issue of such an epic. An issue that has a number in `paired_parent` is a sub-issue of that open `agent:paired` epic, so the interactive agent owns it too. Assess it and give it risk and type labels, but do not route it: no `agent:ready`, no `needs:human`, no `split_into`. The script labels it `agent:paired`, takes `agent:ready` and `needs:human` off it if it has them, and drops splits on it anyway; you never add or remove `agent:paired` yourself.
 
 ## Issues with an Owner decision
 

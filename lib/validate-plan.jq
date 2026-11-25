@@ -19,9 +19,12 @@
 #    and needs:human are neither added nor removed and the issue is not split; the label
 #    itself is untouchable like agent:urgent. Risk/type labels and the assessment stay allowed.
 #  - a sub-issue of an agent:paired epic ($paired_parents, a fact from candidates.jq) is
-#    labeled agent:paired here, whatever the plan proposed, and is then frozen the same
-#    way: no agent:ready, no needs:human (added or removed), no split. This is the only
-#    place agent:paired is ever added; the plan itself still cannot add or remove it.
+#    labeled agent:paired here, whatever the plan proposed and whatever it carried:
+#    agent:ready and needs:human are not added, and are removed when the issue has them,
+#    so it ends with agent:paired and neither routing label. No split. This is the only
+#    place agent:paired is ever added; the plan itself still cannot add or remove it. A
+#    sub-issue that already carries agent:paired is under the freeze above instead: its
+#    routing labels are left as they are.
 #  - an issue with an "Owner decision" comment ($decided, a fact from candidates.jq) keeps
 #    its labels exactly as they are: nothing is added or removed (routing, risk and type
 #    alike), the risk gate adds no needs:human, and the issue is not split. The assessment
@@ -63,11 +66,17 @@ def prefix($p): map(select(startswith($p)));
     | ([$paired_parents[($a.issue | tostring)] | numbers][0] // null) as $epic
     | (($cur | index("agent:paired")) != null) as $has_paired
     | ($has_paired or $epic != null) as $paired
+    # $adopt: a sub-issue of a paired epic that is not agent:paired yet
+    | ($epic != null and ($has_paired | not)) as $adopt
+    # the plan naming agent:paired on such an issue asks for what happens anyway
+    | (if $adopt then $bad - ["agent:paired"] else $bad end) as $bad
     | (if $paired then $add2 | map(select(. != "agent:ready" and . != "needs:human")) else $add2 end) as $add2
     # one of each at most
     | ([$add2[] | select(startswith("risk:"))][:1] + [$add2[] | select(startswith("type:"))][:1]
        + [$add2[] | select(startswith("agent:") or startswith("needs:"))] | unique) as $add3
-    | ([($a.remove_labels // [])[] | select(. == "agent:ready" or . == "needs:human") | select($paired | not)]) as $remove
+    # $adopt: both routing labels go (those the issue has; see $remove_final), asked or not
+    | (if $adopt then ["agent:ready", "needs:human"]
+       else [($a.remove_labels // [])[] | select(. == "agent:ready" or . == "needs:human") | select($paired | not)] end) as $remove
     | ((($cur + $add3) - $remove) | unique) as $final
     | ([$final[] | select(startswith("risk:"))][0] // "none") as $risk
     | ($risk == "risk:low" or ($allow_medium and $risk == "risk:medium")) as $risk_ok
@@ -78,7 +87,7 @@ def prefix($p): map(select(startswith($p)));
     | (if ($gate.labels | index("agent:ready")) != null
          then $gate.labels - ["needs:human"] else $gate.labels end) as $add_final
     # a sub-issue of a paired epic becomes agent:paired itself
-    | (if $epic != null then $add_final + ["agent:paired"] | unique else $add_final end) as $add_final
+    | (if $adopt then $add_final + ["agent:paired"] | unique else $add_final end) as $add_final
     | ((if ($add_final | index("needs:human")) != null then $remove + ["agent:ready"] else $remove end)
        | if ($add_final | index("agent:ready")) != null then . + ["needs:human"] else . end
        | unique | map(select(. as $l | $cur | index($l) != null))) as $remove_final
@@ -91,8 +100,8 @@ def prefix($p): map(select(startswith($p)));
         split_into: (if $paired then [] else [($a.split_into // [])[:5][] | {title, body}] end),
         notes: ([$gate.note,
                  (if ($bad | length) > 0 then "ignored unmanaged labels: \($bad | join(", "))" else empty end),
-                 (if $epic != null and ($has_paired | not)
-                  then "agent:paired added, routing left alone and no split: sub-issue of #\($epic), which is agent:paired (owned by the interactive agent)"
+                 (if $adopt
+                  then "agent:paired added, agent:ready and needs:human dropped, and no split: sub-issue of #\($epic), which is agent:paired (owned by the interactive agent)"
                   elif $paired and ((($a.add_labels // []) + ($a.remove_labels // []) | map(select(. == "agent:ready" or . == "needs:human")) | length) > 0
                                   or (($a.split_into // []) | length) > 0)
                   then "routing left alone: agent:paired (owned by the interactive agent)" else empty end)]

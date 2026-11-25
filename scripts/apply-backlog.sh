@@ -49,8 +49,9 @@ while read -r a; do
   (( ${#args[@]} )) && run gh issue edit "$n" -R "$repo" "${args[@]}"
   # A repository that never ran bootstrap-labels.sh since agent:paired exists has no such
   # label, and gh then refuses the edit. Under set -e that would end the whole run, so
-  # this one addition may fail: the issue keeps its other labels (never agent:ready or
-  # needs:human, which validate-plan.jq already dropped) and the digest says so.
+  # this one addition may fail: the issue keeps its other labels, is left without a
+  # routing label (validate-plan.jq dropped agent:ready and needs:human, and the edit
+  # above removed the ones it had) and the digest says so.
   pair_failed=false
   if [[ $(jq -r '.add_labels | index("agent:paired") != null' <<<"$a") == true ]]; then
     if run gh issue edit "$n" -R "$repo" --add-label agent:paired; then

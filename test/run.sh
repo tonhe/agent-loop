@@ -1574,7 +1574,38 @@ check "plan: a child gets agent:paired even when the plan proposes nothing, with
 r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:low"],"remove_labels":["agent:paired"]}]}' "$ppm")
 check "plan: the plan cannot keep agent:paired off a child by asking to remove it" '{"add":["agent:paired","risk:low"],"rm":[]}' "$(jq -c '{add: (.apply[0].add_labels | sort), rm: .apply[0].remove_labels}' <<<"$r")"
 r=$(vpp "$curc" '{"actions":[{"issue":2,"add_labels":["agent:ready"],"remove_labels":["needs:human"]}]}' "$ppm")
-check "plan: routing labels already on a child are neither added to nor removed" '{"add":["agent:paired"],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+check "plan: needs:human already on a child is removed, agent:ready is not added" '{"add":["agent:paired"],"rm":["needs:human"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+# The case from the report: the children already carried needs:human and the owner had to
+# take it off by hand. Whatever a child has and whatever the plan proposes, it ends the
+# run with agent:paired and neither routing label.
+curr='{"1":["agent:ready","risk:low"],"2":["needs:human","type:bug"],"3":["agent:paired","needs:human"],"4":["agent:ready","needs:human"],"5":["risk:low"]}'
+ppr='{"1":7,"2":7,"3":7,"4":7,"5":7}'
+fin() { jq -c --argjson cur "$1" '.apply[0] | (($cur + .add_labels) - .remove_labels) | sort' <<<"$2"; }
+r=$(vpp "$curr" '{"actions":[{"issue":2,"add_labels":[],"remove_labels":[],"assessment":"a"}]}' "$ppr")
+check "plan: a child with needs:human loses it though the plan did not ask" '{"add":["agent:paired"],"rm":["needs:human"]}|["agent:paired","type:bug"]' \
+  "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")|$(fin '["needs:human","type:bug"]' "$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":2,"add_labels":["needs:human"],"remove_labels":[],"question":"q"}]}' "$ppr")
+check "plan: ... and though the plan proposes needs:human again" '{"add":["agent:paired"],"rm":["needs:human"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":1,"add_labels":["agent:ready","type:docs"],"remove_labels":[]}]}' "$ppr")
+check "plan: a child with agent:ready loses it" '{"add":["agent:paired","type:docs"],"rm":["agent:ready"]}|["agent:paired","risk:low","type:docs"]' \
+  "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")|$(fin '["agent:ready","risk:low"]' "$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":4,"add_labels":["risk:high"],"remove_labels":["agent:ready"]}]}' "$ppr")
+check "plan: a child with both loses both" '{"add":["agent:paired","risk:high"],"rm":["agent:ready","needs:human"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["needs:human"],"remove_labels":["agent:ready","needs:human"]}]}' "$ppr")
+check "plan: a child with neither has nothing in remove_labels" '{"add":["agent:paired"],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+check "plan: ... and the note says what was done and names the epic" "1" "$(jq '[.apply[0].notes[] | select(contains("agent:ready and needs:human dropped") and contains("sub-issue of #7"))] | length' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":3,"add_labels":["agent:ready"],"remove_labels":["needs:human"]}]}' "$ppr")
+check "plan: a child that already carries agent:paired keeps the freeze: its needs:human stays" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":2,"add_labels":["agent:ready"],"remove_labels":["needs:human"],"assessment":"a"}]}' "$ppr" '[2]')
+check "plan: Owner decision + paired parent + existing needs:human: untouched" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["agent:paired","type:bug"],"remove_labels":[]}]}' "$ppr")
+check "plan: a plan that itself proposes agent:paired on a child gets one note, not an 'ignored' one too" '["agent:paired","type:bug"]|1|0' \
+  "$(jq -c '.apply[0].add_labels | sort' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("agent:paired added"))] | length' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("ignored unmanaged"))] | length' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["agent:paired","admin"],"remove_labels":[]}]}' "$ppr")
+check "plan: ... another unmanaged label next to it is still reported" '["ignored unmanaged labels: admin"]' "$(jq -c '[.apply[0].notes[] | select(contains("ignored unmanaged"))]' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["agent:paired","admin"],"remove_labels":[]}]}' '{}')
+check "plan: ... and on an issue that is not a child agent:paired is still reported as ignored" '["ignored unmanaged labels: agent:paired, admin"]|[]' \
+  "$(jq -c '[.apply[0].notes[] | select(contains("ignored unmanaged"))]' <<<"$r")|$(jq -c '.apply[0].add_labels' <<<"$r")"
 r=$(vpp "$curc" '{"actions":[{"issue":3,"add_labels":["risk:low","needs:human"],"remove_labels":[]}]}' "$ppm")
 check "plan: a child that already is agent:paired is not given the label twice" '["risk:low"]' "$(jq -c '.apply[0].add_labels' <<<"$r")"
 r=$(vpp "$curc" '{"actions":[{"issue":4,"add_labels":["risk:low","agent:ready"],"remove_labels":[],"split_into":[{"title":"t","body":"b"}]},
@@ -1617,7 +1648,8 @@ esac
 GH
 chmod +x "$pe/bin/gh"
 perun() { PATH="$pe/bin:$PATH" GHLOG="$pe/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe "$@"; }
-pe_all=$(jq -c '. + [{"number":43,"title":"natively blocked","body":"Part of #5.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}]' <<<"$pc_in")
+# Child 30 already carries needs:human and child 31 agent:ready, as after an earlier triage.
+pe_all=$(jq -c 'map(if .number == 30 then .labels = [{"name":"needs:human"}] elif .number == 31 then .labels = [{"name":"agent:ready"}] else . end) + [{"number":43,"title":"natively blocked","body":"Part of #5.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}]' <<<"$pc_in")
 pe_parents='{"data":{"repository":{"issues":{"nodes":[{"number":31,"parent":{"number":5,"repository":{"nameWithOwner":"o/r"}}},{"number":30,"parent":null}]}}}}'
 pe_blockers='{"data":{"repository":{"issues":{"nodes":[{"number":43,"blockedBy":{"totalCount":1,"nodes":[{"number":6,"state":"OPEN"}]}}]}}}}'
 pef() { jq -c --argjson n "$2" '[.[] | select(.number == $n) | .paired_parent]' "$1/candidates.json"; }
@@ -1650,27 +1682,28 @@ echo '{"summary":"s","actions":[
 out=$(DRY_RUN=false perun bash "$root/scripts/apply-backlog.sh" "$pe/w" 2>/dev/null); rc=$?
 check "apply (paired epic): exit 0; both children get agent:paired" "0|1|1" \
   "$rc|$(grep -c '^issue edit 30 -R o/r --add-label agent:paired$' "$pe/log")|$(grep -c '^issue edit 31 -R o/r --add-label agent:paired$' "$pe/log")"
-check "apply (paired epic): ... keep risk and type, and get neither needs:human nor agent:ready" "1|1|0" \
-  "$(grep -c '^issue edit 30 -R o/r --add-label risk:medium,type:feature$' "$pe/log")|$(grep -c '^issue edit 31 -R o/r --add-label risk:low,type:bug$' "$pe/log")|$(grep -E '^issue edit (30|31) ' "$pe/log" | grep -cE 'needs:human|agent:ready')"
+check "apply (paired epic): ... keep risk and type, and lose the needs:human / agent:ready they had" "1|1" \
+  "$(grep -c '^issue edit 30 -R o/r --add-label risk:medium,type:feature --remove-label needs:human$' "$pe/log")|$(grep -c '^issue edit 31 -R o/r --add-label risk:low,type:bug --remove-label agent:ready$' "$pe/log")"
+check "apply (paired epic): ... and neither routing label is ever added to them" "0" "$(grep -E '^issue edit (30|31) ' "$pe/log" | grep -cE -- '--add-label [^ ]*(needs:human|agent:ready)')"
 check "apply (paired epic): ... are not split, and the comment names the epic" "0|2" "$(grep -c '^issue create ' "$pe/log")|$(grep -c '^- .*sub-issue of #5' "$pe/log")"
 check "apply (paired epic): the epic itself is handled as before (risk only, no label added to it)" "1|1" \
   "$(grep -c '^issue edit 5 ' "$pe/log")|$(grep -c '^issue edit 5 -R o/r --add-label risk:medium$' "$pe/log")"
 check "apply (paired epic): an issue under an unpaired parent is routed as before" "1" "$(grep -c '^issue edit 32 -R o/r --add-label agent:ready,risk:low,type:docs$' "$pe/log")"
-check "apply (paired epic): the digest shows the label" "1|1" "$(grep -c '^- #30 +agent:paired,risk:medium,type:feature$' <<<"$out")|$(grep -c '^- #31 +agent:paired,risk:low,type:bug$' <<<"$out")"
+check "apply (paired epic): the digest shows the label and the removal" "1|1" "$(grep -c '^- #30 +agent:paired,risk:medium,type:feature -needs:human$' <<<"$out")|$(grep -c '^- #31 +agent:paired,risk:low,type:bug -agent:ready$' <<<"$out")"
 
 # The repository has no agent:paired label: gh refuses that edit. The run must go on.
 : > "$pe/log"
 out=$(DRY_RUN=false S_NO_PAIRED_LABEL=1 perun bash "$root/scripts/apply-backlog.sh" "$pe/w" 2>"$pe/err"); rc=$?
 check "apply (label missing): the run does not abort" "0|1|1" "$rc|$(grep -c '^issue edit 32 -R o/r --add-label agent:ready,risk:low,type:docs$' "$pe/log")|$(grep -c '^- #32 ' <<<"$out")"
 check "apply (label missing): the other labels of the child are still applied, and its comment posted" "1|1" \
-  "$(grep -c '^issue edit 30 -R o/r --add-label risk:medium,type:feature$' "$pe/log")|$(grep -c '^issue comment 30 ' "$pe/log")"
+  "$(grep -c '^issue edit 30 -R o/r --add-label risk:medium,type:feature --remove-label needs:human$' "$pe/log")|$(grep -c '^issue comment 30 ' "$pe/log")"
 check "apply (label missing): the digest says so on each child's line" "1|1" \
-  "$(grep -c '^- #30 +risk:medium,type:feature (agent:paired could not be added; run scripts/bootstrap-labels.sh)$' <<<"$out")|$(grep -c '^- #31 +risk:low,type:bug (agent:paired could not be added; run scripts/bootstrap-labels.sh)$' <<<"$out")"
+  "$(grep -c '^- #30 +risk:medium,type:feature -needs:human (agent:paired could not be added; run scripts/bootstrap-labels.sh)$' <<<"$out")|$(grep -c '^- #31 +risk:low,type:bug -agent:ready (agent:paired could not be added; run scripts/bootstrap-labels.sh)$' <<<"$out")"
 check "apply (label missing): ... the comment says so too, and the log carries a warning per child" "2|2" \
   "$(grep -c '^- agent:paired could not be added' "$pe/log")|$(grep -c '^::warning::Could not add agent:paired to #' "$pe/err")"
-check "apply (label missing): still neither needs:human nor agent:ready on a child" "0" "$(grep -E '^issue edit (30|31) ' "$pe/log" | grep -cE 'needs:human|agent:ready')"
+check "apply (label missing): still neither needs:human nor agent:ready added to a child" "0" "$(grep -E '^issue edit (30|31) ' "$pe/log" | grep -cE -- '--add-label [^ ]*(needs:human|agent:ready)')"
 out=$(DRY_RUN=true perun bash "$root/scripts/apply-backlog.sh" "$pe/w" 2>/dev/null); rc=$?
-check "apply (paired epic): a dry run reports the label like a real one" "0|1" "$rc|$(grep -c '^- #30 +agent:paired,risk:medium,type:feature$' <<<"$out")"
+check "apply (paired epic): a dry run reports the label like a real one" "0|1" "$rc|$(grep -c '^- #30 +agent:paired,risk:medium,type:feature -needs:human$' <<<"$out")"
 rm -rf "$pe"
 check "backlog prompt: names the paired_parent fact and the rule for such an issue" "1|1" \
   "$(grep -c 'has a number in `paired_parent`' "$root/prompts/backlog.md")|$(grep -c 'The script labels it `agent:paired`' "$root/prompts/backlog.md")"
