@@ -59,6 +59,4 @@ if [[ "$markers" != "$n" ]]; then
 fi
 
 echo "Loop PR for issue #$n: blocking review."
-echo "run=true" >> "$out"
-echo "mode=loop" >> "$out"
-echo "issue=$n" >> "$out"
+{ echo "run=true"; echo "mode=loop"; echo "issue=$n"; } >> "$out"
