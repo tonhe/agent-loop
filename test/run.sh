@@ -309,6 +309,66 @@ check "issue-context: ISSUE_JSON_OUT keeps the issue it accepted" "0|1" "$?|$(jq
 check "issue-context: ISSUE_JSON_OUT is not written for a refused issue" "1|no" "$?|$([[ -e "$lk/ctx2.json" ]] && echo yes || echo no)"
 rm -rf "$lk"
 
+# ---------- large PRs: the split planner (lib/split.jq) ----------
+# numstat text in, groups out. sp TEXT [max_files max_lines max_calls] [filter]
+sp() { jq -Rsc -L "$root/lib" --argjson f "${2:-40}" --argjson l "${3:-3000}" --argjson c "${4:-8}" \
+         'include "split"; parse_numstat | split_plan($f; $l; $c) | '"${5:-.}" <<<"$1"; }
+ns() { local i; for i in $(seq 1 "$1"); do printf '%s\t%s\t%s%s\n' "${3:-1}" "${4:-0}" "$2" "$i.go"; done; }  # count, path prefix, [added], [deleted]
+tab=$'\t'
+check "numstat: added, deleted and path; binary files count as files only" \
+  '[{"path":"a/b.go","binary":false,"lines":15},{"path":"img/logo.png","binary":true,"lines":0}]' \
+  "$(jq -Rsc -L "$root/lib" 'include "split"; parse_numstat' <<<"10${tab}5${tab}a/b.go"$'\n'"-${tab}-${tab}img/logo.png")"
+check "numstat: names with spaces and leading dashes are kept as they are" '["dir/with space.go","-rf/--force.go","--","a => b.go"]' \
+  "$(jq -Rsc -L "$root/lib" 'include "split"; parse_numstat | map(.path)' <<<"1${tab}1${tab}dir/with space.go"$'\n'"1${tab}1${tab}-rf/--force.go"$'\n'"1${tab}1${tab}--"$'\n'"1${tab}1${tab}a => b.go")"
+check "numstat: C-quoted names (quote, backslash, newline, tab, octal) are decoded" '["dir/a\"b.go","dir/new\nline.go","back\\slash","tab\there","oct\u0001al"]' \
+  "$(jq -Rsc -L "$root/lib" 'include "split"; parse_numstat | map(.path)' <<<"1${tab}1${tab}\"dir/a\\\"b.go\""$'\n'"1${tab}1${tab}\"dir/new\\nline.go\""$'\n'"1${tab}1${tab}\"back\\\\slash\""$'\n'"1${tab}1${tab}\"tab\\there\""$'\n'"1${tab}1${tab}\"oct\\001al\"")"
+check "numstat: a name that only looks quoted at one end is left alone" '["\"half","half\""]' \
+  "$(jq -Rsc -L "$root/lib" 'include "split"; parse_numstat | map(.path)' <<<"1${tab}1${tab}\"half"$'\n'"1${tab}1${tab}half\"")"
+check "numstat: lines that are not numstat are ignored; empty input -> no files" '[1,0]' \
+  "$(jq -Rsc -L "$root/lib" 'include "split"; [(parse_numstat | length)]' <<<"warning: something"$'\n'"3${tab}1${tab}x.go"$'\n'"x${tab}1${tab}y.go" | jq -c --argjson e "$(jq -Rsc -L "$root/lib" 'include "split"; parse_numstat | length' </dev/null)" '. + [$e]')"
+check "split: under both thresholds -> one group, not split" '{"split":false,"capped":false,"names":["all"],"files":[3],"lines":[30]}' \
+  "$(sp "$(ns 3 a/f 10 0)" 40 3000 8 '{split, capped, names: [.groups[].name], files: [.groups[].files], lines: [.groups[].lines]}')"
+check "split: exactly at the thresholds is still one group" 'false' "$(sp "$(ns 40 a/f 75 0)" 40 3000 8 '.split')"
+check "split: over by files -> one group per top-level directory" '{"split":true,"names":["a/","b/"],"files":[20,21]}' \
+  "$(sp "$(ns 20 a/f; ns 21 b/f)" 40 3000 8 '{split, names: [.groups[].name], files: [.groups[].files]}')"
+check "split: over by lines -> split although the file count is small" '{"split":true,"names":["a/","b/"],"lines":[2000,2000]}' \
+  "$(sp "$(ns 1 a/f 1500 500; ns 1 b/f 2000 0)" 40 3000 8 '{split, names: [.groups[].name], lines: [.groups[].lines]}')"
+check "split: binary files count toward the file threshold, not the lines" '{"split":true,"total_files":41,"total_lines":0}' \
+  "$(sp "$(for i in $(seq 1 41); do printf -- '-\t-\td%s/img.png\n' "$i"; done)" 40 3000 8 '{split, total_files, total_lines}')"
+check "split: small groups are packed together" '["cmd/, docs/","internal/"]' \
+  "$(sp "$(ns 5 cmd/f; ns 5 docs/f; ns 35 internal/f)" 40 3000 8 '[.groups[].name]')"
+check "split: one huge directory is split one level deeper" '["cmd/, internal/a/","internal/b/"]' \
+  "$(sp "$(ns 5 cmd/f; ns 30 internal/a/f; ns 30 internal/b/f)" 40 3000 8 '[.groups[].name]')"
+check "split: ... and deeper again while a group is still too big" '["x/y/p/","x/y/q/","x/y/r/"]' \
+  "$(sp "$(ns 30 x/y/p/f; ns 30 x/y/q/f; ns 30 x/y/r/f)" 40 3000 8 '[.groups[].name]')"
+check "split: root-level files form their own group" '[["(root files)",["Makefile","README.md"]],["a/",30],["b/",30]]' \
+  "$(sp "1${tab}1${tab}README.md"$'\n'"1${tab}1${tab}Makefile"$'\n'"$(ns 30 a/f; ns 30 b/f)" 31 3000 8 '[.groups[] | [.name, (if .name == "(root files)" then .paths else .files end)]]')"
+check "split: files directly in a split directory form their own group next to its subdirectories" '["a/ (files)","a/sub/","b/"]' \
+  "$(sp "$(ns 30 a/f; ns 30 a/sub/f; ns 30 b/f)" 30 3000 8 '[.groups[].name]')"
+check "split: a flat directory that cannot be split by directory is cut into parts" '[["big/ (files) part 1/3",40],["big/ (files) part 2/3",40],["big/ (files) part 3/3",20]]' \
+  "$(sp "$(ns 100 big/f)" 40 3000 8 '[.groups[] | [.name, .files]]')"
+check "split: one file over the line threshold cannot be split: its own group" '[["a/",1,9000],["b/",2,20]]' \
+  "$(sp "9000${tab}0${tab}a/huge.go"$'\n'"$(ns 2 b/f 10 0)" 40 3000 8 '[.groups[] | [.name, .files, .lines]]')"
+check "split: a PR that is one huge file is one group, not split" '{"split":false,"n":1,"lines":9000}' \
+  "$(sp "9000${tab}0${tab}go.sum" 40 3000 8 '{split, n: (.groups | length), lines: .groups[0].lines}')"
+check "split: more groups than the cap -> the smallest are merged, and the plan says so" '{"n":8,"capped":true,"uncapped":10,"files":400}' \
+  "$(sp "$(for d in 0 1 2 3 4 5 6 7 8 9; do ns 40 "d$d/f"; done)" 40 3000 8 '{n: (.groups | length), capped, uncapped, files: ([.groups[].files] | add)}')"
+check "split: under the cap nothing is merged" '{"n":3,"capped":false}' \
+  "$(sp "$(ns 40 a/f; ns 40 b/f; ns 40 c/f)" 40 3000 8 '{n: (.groups | length), capped}')"
+check "split: a cap of 1 gives one group holding everything" '{"n":1,"files":120,"capped":true,"split":false}' \
+  "$(sp "$(ns 40 a/f; ns 40 b/f; ns 40 c/f)" 40 3000 1 '{n: (.groups | length), files: .groups[0].files, capped, split}')"
+sp_mix="$(ns 50 internal/tui/f 30 5; ns 45 internal/probe/f 3 1; ns 3 cmd/via/f 900 0; ns 12 docs/f; ns 2 r 5 5)"$'\n'"1${tab}1${tab}\"odd/new\\nline.go\""$'\n'"1${tab}1${tab}-dash/--x.go"$'\n'"1${tab}1${tab}sp ace/a b.go"$'\n'"-${tab}-${tab}img/a.png"
+check "split: every file lands in exactly one group, with its exact name" 'true' \
+  "$(sp "$sp_mix" 40 3000 8 '([.groups[].paths[]] | sort) as $got | $got == ($got | unique) and ($got | length) == .total_files and ($got | index("odd/new\nline.go") != null) and ($got | index("-dash/--x.go") != null) and ($got | index("sp ace/a b.go") != null)')"
+check "split: group sizes add up to the totals" 'true' \
+  "$(sp "$sp_mix" 40 3000 8 '([.groups[].files] | add) == .total_files and ([.groups[].lines] | add) == .total_lines and all(.groups[]; .files == (.paths | length))')"
+check "split: no group is over a threshold unless it is one file or the cap merged it" 'true' \
+  "$(sp "$sp_mix" 40 3000 8 '.capped or all(.groups[]; (.files <= 40 and .lines <= 3000) or .files == 1)')"
+check "split: empty diff -> one empty group" '{"split":false,"n":1,"files":0}' \
+  "$(jq -Rsc -L "$root/lib" 'include "split"; parse_numstat | split_plan(40; 3000; 8) | {split, n: (.groups | length), files: .groups[0].files}' </dev/null)"
+check "split: nonsense thresholds are treated as 1, never as unlimited" '{"n":2,"capped":false}' \
+  "$(sp "$(ns 1 a/f; ns 1 b/f)" 0 -5 8 '{n: (.groups | length), capped}')"
+
 # ---------- apply-backlog.sh (stubbed gh, dry run) ----------
 ab=$(mktemp -d); mkdir -p "$ab/bin" "$ab/w/claude"
 printf '#!/usr/bin/env bash\necho "$*" >> "$GHLOG"\n' > "$ab/bin/gh"; chmod +x "$ab/bin/gh"
