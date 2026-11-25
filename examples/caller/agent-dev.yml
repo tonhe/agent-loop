@@ -22,6 +22,7 @@ on:
 permissions:
   contents: read
   issues: read
+  actions: read   # the nightly run looks for an unfinished backlog run and waits for it
 # Label events other than agent:urgent get their own throwaway group, so they can never
 # displace a queued nightly or urgent run.
 concurrency:
@@ -43,6 +44,8 @@ jobs:
       verify_command: make test-all     # CHANGE: command that proves a change works
       go_version_file: go.mod          # CHANGE: drop for non-Go; use setup_command
       # selection_order: type          # optional: bugs, then tech-debt, upkeep, features (default: oldest)
+      # backlog_workflow: triage.yml   # optional: your backlog workflow file, if not agent-backlog.yml
+      # backlog_wait_minutes: 0        # optional: nightly runs wait up to 15 min for a backlog run; 0 = never
       bash_allow: >-
         Bash(go build:*),Bash(go test:*),Bash(go vet:*),Bash(gofmt:*),Bash(go mod tidy),
         Bash(make build),Bash(make test),Bash(make test-race),Bash(make test-tui),

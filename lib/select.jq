@@ -1,5 +1,6 @@
 # Pick issues the dev agent may work on tonight.
-# Input:  {"issues": [gh issue list JSON: number,labels,createdAt,author,body,milestone], "prs": [gh pr list JSON]}
+# Input:  {"issues": [gh issue list JSON: number,labels,createdAt,author,body,milestone],
+#          "prs": [gh pr list JSON: number,body,headRefName,isCrossRepository,author]}
 # Args:   --arg owner LOGIN  --argjson max N  --argjson open [open issue numbers]
 #         --argjson native {"<issue number>": [open native blocker numbers]}   optional, default {}
 #         --argjson milestones [{"number": N, "dueOn": "ISO date" | null}]     optional, default []
@@ -21,7 +22,15 @@
 #         an error.
 # Never picked here: agent:paired issues (owned by the owner's interactive agent) and the
 # Release / Plan issues the loop files itself (lib/meta.jq).
+# Busy:   an issue with an open PR is skipped. Issue N is busy only when an open PR that
+#         is not from a fork and was opened by the owner has the head branch issue-N
+#         (lib/pr.jq). The PR body is not read: a missing or wrong marker must not free
+#         the issue (publish-pr.sh would force-push issue-N over the PR under review), and
+#         a marker in someone else's PR, or their fork's branch name, must not block one.
+#         Each PR needs the fields number, headRefName, isCrossRepository, author; a list
+#         without them is an error.
 include "blocked";
+include "pr";
 include "meta";
 include "milestone";
 def names: [.labels[].name];
@@ -41,7 +50,10 @@ def type_group:
 | ($ARGS.named.order // "oldest") as $order
 | (if $order == "oldest" or $order == "type" then . else error("unknown order: use oldest or type") end)
 | ($ARGS.named.milestones // []) as $milestones
-| ([.prs[].body // "" | [scan("agent-loop issue=([0-9]+)")[] | tonumber]] | add // []) as $busy
+| (.prs
+   | map(if type == "object" and (["headRefName", "isCrossRepository", "author"] - keys == []) then .
+         else error("select: every PR needs headRefName, isCrossRepository and author; without them no issue would look busy") end)
+   | map(select(.isCrossRepository == false and .author.login? == $owner) | branch_issue | values)) as $busy
 | [ .issues[]
     | select(.author.login == $owner)
     | select(has("agent:ready"))
