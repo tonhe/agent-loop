@@ -13,7 +13,11 @@ gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 200 \
 open=$(jq -c '[.[].number]' "$out/all.json")
 # Native dependencies; {} with a warning if the API is unavailable.
 native=$(bash "$here/scripts/native-blockers.sh")
+# Native sub-issue links, for children of an agent:paired epic. A separate query, so its
+# failure ({} with a warning) leaves the blockers above alone; "Part of #N" still counts.
+parents=$(bash "$here/scripts/native-parents.sh")
 jq --arg owner "$OWNER_LOGIN" --argjson max "${MAX_CANDIDATES:-25}" --argjson open "$open" --argjson native "$native" \
+   --argjson parents "$parents" \
    -L "$here/lib" -f "$here/lib/candidates.jq" "$out/all.json" > "$out/candidates.json"
 
 # Owner issues skipped because they are blocked (numbers only, for the digest).

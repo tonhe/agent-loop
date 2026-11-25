@@ -1663,6 +1663,227 @@ check "backlog prompt: names the owner_decision fact and says such an issue only
   "$(grep -c 'has `owner_decision: true`' "$root/prompts/backlog.md")|$(grep -c 'Leave `add_labels`, `remove_labels` and `split_into` empty' "$root/prompts/backlog.md")"
 check "readme: the rule is listed under the guardrails" "1" "$(grep -c '^| Triage never changes a label on an issue with an "Owner decision" comment' "$root/README.md")"
 
+# ---------- sub-issues of an agent:paired epic are agent:paired too ----------
+# A script decides who is a child (lib/paired.jq, used by lib/candidates.jq), from two
+# sources: GitHub's native parent link, and a body line that starts with "Part of #N".
+# The parent must be open, authored by the owner and agent:paired. The epic's own task
+# list is not read.
+po() { jq -nc -L "$root/lib" --arg b "$1" 'include "paired"; $b | part_of'; }
+check "part_of: a line starting with Part of #N (real viaduct phrasings)" "[5]|[6]" \
+  "$(po 'Part of #5. Blocked by #4.')|$(po 'Part of #6. Blocked by the agent-mode design issue under #6, and by #4.')"
+check "part_of: any line of the body, bold markup allowed, CRLF tolerated, in body order" "[5,7,12]" \
+  "$(po $'Context first.\n**Part of #5.**\n__Part of #7__\r\nPart of #12')"
+check "part_of: a quoted line is not one" "[]" "$(po '> Part of #5.')"
+check "part_of: negated or mid-sentence is not one" "[]|[]" "$(po 'This is not part of #5.')|$(po 'It is not Part of #5 at all.')"
+check "part_of: a list item, an indented line and lower case are not one" "[]|[]|[]" "$(po '- Part of #5')|$(po '    Part of #5')|$(po 'part of #5')"
+check "part_of: the number must follow directly, in this repository" "[]|[]|[]" \
+  "$(po 'Part of the M6 epic (#5)')|$(po 'Part of tonhe/other#5')|$(po 'Part of # 5')"
+check "part_of: a missing body has none" "[]" "$(jq -nc -L "$root/lib" 'include "paired"; null | part_of')"
+
+npages='[{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":true,"endCursor":"c"},"nodes":[
+   {"number":31,"parent":{"number":5,"repository":{"nameWithOwner":"o/r"}}},
+   {"number":40,"parent":{"number":5,"repository":{"nameWithOwner":"o/other"}}},
+   {"number":41,"parent":null}]}}}},
+ {"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+   {"number":42,"parent":{"number":6,"repository":{"nameWithOwner":"O/R"}}}]}}}}]'
+np() { jq -c --arg repo o/r -f "$root/lib/native-parents.jq"; }
+check "native-parents: issue -> parent across pages; a parent in another repository is not one" '{"31":5,"42":6}' "$(np <<<"$npages")"
+np <<<'[{"errors":[{"message":"Field parent does not exist"}]}]' >/dev/null 2>&1
+check "native-parents: GraphQL error answer is refused" "5" "$?"
+np <<<'[]' >/dev/null 2>&1
+check "native-parents: empty answer is refused" "5" "$?"
+
+# 5: paired epic (and "part of" itself). 6: epic, not paired. 9: paired, but not the owner's.
+pc_in='[
+ {"number":5,"title":"epic","body":"Part of #5.\n- [ ] #44","labels":[{"name":"agent:paired"}],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":6,"title":"plain epic","body":"b","labels":[{"name":"type:feature"}],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":9,"title":"not mine","body":"b","labels":[{"name":"agent:paired"}],"author":{"login":"mallory"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":30,"title":"by text","body":"Part of #5. Do the thing.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":31,"title":"by native link","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":32,"title":"parent not paired","body":"Part of #6.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":33,"title":"parent closed","body":"Part of #77.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":34,"title":"parent by someone else","body":"Part of #9.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":35,"title":"quoted","body":"> Part of #5.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":36,"title":"negated","body":"This is not part of #5.\nIt is not Part of #5 either.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":37,"title":"second line, bold","body":"Context.\n**Part of #5.**","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":38,"title":"prefix of a number","body":"Part of #55.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":39,"title":"native says 6, text says 5","body":"Part of #5.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":40,"title":"native parent by someone else","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":41,"title":"native parent closed","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":44,"title":"only in the task list of the epic","body":"b","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}
+]'
+pcp='{"31":5,"39":6,"40":9,"41":77}'
+pc=$(jq -c --arg owner tonhe --argjson max 25 --argjson open '[]' --argjson parents "$pcp" -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$pc_in")
+ppf() { jq -c --argjson n "$1" '.[] | select(.number == $n) | .paired_parent' <<<"$pc"; }
+check "paired_parent: a Part of #N line naming an open, owner-authored, paired epic" "5" "$(ppf 30)"
+check "paired_parent: the native parent link, with no text at all" "5" "$(ppf 31)"
+check "paired_parent: null when the parent is not agent:paired" "null" "$(ppf 32)"
+check "paired_parent: null when the parent is closed (absent from the open list)" "null" "$(ppf 33)"
+check "paired_parent: null when the paired parent is someone else's issue" "null" "$(ppf 34)"
+check "paired_parent: null when Part of #N is only quoted or negated" "null|null" "$(ppf 35)|$(ppf 36)"
+check "paired_parent: any line of the body counts, bold or not" "5" "$(ppf 37)"
+check "paired_parent: the number is matched exactly, not by prefix" "null" "$(ppf 38)"
+check "paired_parent: either source is enough (native parent not paired, text parent paired)" "5" "$(ppf 39)"
+check "paired_parent: a native parent that is not the owner's, or closed, does not count" "null|null" "$(ppf 40)|$(ppf 41)"
+check "paired_parent: the epic is not its own child" "null" "$(ppf 5)"
+check "paired_parent: the epic's task list is not a source" "null" "$(ppf 44)"
+check "paired_parent: every candidate carries the fact" "15|15" "$(jq 'length' <<<"$pc")|$(jq '[.[] | select(has("paired_parent"))] | length' <<<"$pc")"
+check "paired_parent: without the parents argument the text source still works" "5|null" \
+  "$(jq -c --arg owner tonhe --argjson max 25 --argjson open '[]' -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$pc_in" | jq -c '(.[] | select(.number == 30) | .paired_parent), (.[] | select(.number == 31) | .paired_parent)' | paste -sd'|' -)"
+
+vpp() { jq -c --argjson allowed '[1,2,3,4,5]' --argjson current "$1" --argjson allow_medium false --argjson paired_parents "$3" --argjson decided "${4:-[]}" -f "$root/lib/validate-plan.jq" <<<"$2"; }
+curc='{"1":[],"2":["needs:human","risk:medium"],"3":["agent:paired"],"4":[],"5":[]}'
+ppm='{"1":7,"2":7,"3":7}'
+r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:low","type:bug","agent:ready"],"remove_labels":[],"assessment":"a","split_into":[{"title":"t","body":"b"}]}]}' "$ppm")
+check "plan: a child of a paired epic gets agent:paired instead of agent:ready; risk/type kept" '["agent:paired","risk:low","type:bug"]' "$(jq -c '.apply[0].add_labels | sort' <<<"$r")"
+check "plan: ... it is not split, the assessment is kept and the note names the epic" '[]|a|1' \
+  "$(jq -c '.apply[0].split_into' <<<"$r")|$(jq -r '.apply[0].assessment' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("sub-issue of #7") and contains("agent:paired"))] | length' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:medium","type:feature","needs:human"],"remove_labels":[],"question":"q"}]}' "$ppm")
+check "plan: ... agent:paired instead of needs:human" '["agent:paired","risk:medium","type:feature"]' "$(jq -c '.apply[0].add_labels | sort' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:high","agent:ready"],"remove_labels":[]}]}' "$ppm")
+check "plan: ... and the risk gate adds no needs:human to it" '["agent:paired","risk:high"]' "$(jq -c '.apply[0].add_labels | sort' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":[],"remove_labels":[],"assessment":"a"}]}' "$ppm")
+check "plan: a child gets agent:paired even when the plan proposes nothing, with the note" '["agent:paired"]|1' \
+  "$(jq -c '.apply[0].add_labels' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("sub-issue of #7"))] | length' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:low"],"remove_labels":["agent:paired"]}]}' "$ppm")
+check "plan: the plan cannot keep agent:paired off a child by asking to remove it" '{"add":["agent:paired","risk:low"],"rm":[]}' "$(jq -c '{add: (.apply[0].add_labels | sort), rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":2,"add_labels":["agent:ready"],"remove_labels":["needs:human"]}]}' "$ppm")
+check "plan: needs:human already on a child is removed, agent:ready is not added" '{"add":["agent:paired"],"rm":["needs:human"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+# The case from the report: the children already carried needs:human and the owner had to
+# take it off by hand. Whatever a child has and whatever the plan proposes, it ends the
+# run with agent:paired and neither routing label.
+curr='{"1":["agent:ready","risk:low"],"2":["needs:human","type:bug"],"3":["agent:paired","needs:human"],"4":["agent:ready","needs:human"],"5":["risk:low"]}'
+ppr='{"1":7,"2":7,"3":7,"4":7,"5":7}'
+fin() { jq -c --argjson cur "$1" '.apply[0] | (($cur + .add_labels) - .remove_labels) | sort' <<<"$2"; }
+r=$(vpp "$curr" '{"actions":[{"issue":2,"add_labels":[],"remove_labels":[],"assessment":"a"}]}' "$ppr")
+check "plan: a child with needs:human loses it though the plan did not ask" '{"add":["agent:paired"],"rm":["needs:human"]}|["agent:paired","type:bug"]' \
+  "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")|$(fin '["needs:human","type:bug"]' "$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":2,"add_labels":["needs:human"],"remove_labels":[],"question":"q"}]}' "$ppr")
+check "plan: ... and though the plan proposes needs:human again" '{"add":["agent:paired"],"rm":["needs:human"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":1,"add_labels":["agent:ready","type:docs"],"remove_labels":[]}]}' "$ppr")
+check "plan: a child with agent:ready loses it" '{"add":["agent:paired","type:docs"],"rm":["agent:ready"]}|["agent:paired","risk:low","type:docs"]' \
+  "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")|$(fin '["agent:ready","risk:low"]' "$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":4,"add_labels":["risk:high"],"remove_labels":["agent:ready"]}]}' "$ppr")
+check "plan: a child with both loses both" '{"add":["agent:paired","risk:high"],"rm":["agent:ready","needs:human"]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["needs:human"],"remove_labels":["agent:ready","needs:human"]}]}' "$ppr")
+check "plan: a child with neither has nothing in remove_labels" '{"add":["agent:paired"],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+check "plan: ... and the note says what was done and names the epic" "1" "$(jq '[.apply[0].notes[] | select(contains("agent:ready and needs:human dropped") and contains("sub-issue of #7"))] | length' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":3,"add_labels":["agent:ready"],"remove_labels":["needs:human"]}]}' "$ppr")
+check "plan: a child that already carries agent:paired keeps the freeze: its needs:human stays" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":2,"add_labels":["agent:ready"],"remove_labels":["needs:human"],"assessment":"a"}]}' "$ppr" '[2]')
+check "plan: Owner decision + paired parent + existing needs:human: untouched" '{"add":[],"rm":[]}' "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["agent:paired","type:bug"],"remove_labels":[]}]}' "$ppr")
+check "plan: a plan that itself proposes agent:paired on a child gets one note, not an 'ignored' one too" '["agent:paired","type:bug"]|1|0' \
+  "$(jq -c '.apply[0].add_labels | sort' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("agent:paired added"))] | length' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("ignored unmanaged"))] | length' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["agent:paired","admin"],"remove_labels":[]}]}' "$ppr")
+check "plan: ... another unmanaged label next to it is still reported" '["ignored unmanaged labels: admin"]' "$(jq -c '[.apply[0].notes[] | select(contains("ignored unmanaged"))]' <<<"$r")"
+r=$(vpp "$curr" '{"actions":[{"issue":5,"add_labels":["agent:paired","admin"],"remove_labels":[]}]}' '{}')
+check "plan: ... and on an issue that is not a child agent:paired is still reported as ignored" '["ignored unmanaged labels: agent:paired, admin"]|[]' \
+  "$(jq -c '[.apply[0].notes[] | select(contains("ignored unmanaged"))]' <<<"$r")|$(jq -c '.apply[0].add_labels' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":3,"add_labels":["risk:low","needs:human"],"remove_labels":[]}]}' "$ppm")
+check "plan: a child that already is agent:paired is not given the label twice" '["risk:low"]' "$(jq -c '.apply[0].add_labels' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":4,"add_labels":["risk:low","agent:ready"],"remove_labels":[],"split_into":[{"title":"t","body":"b"}]},
+                             {"issue":5,"add_labels":["risk:high","agent:ready"],"remove_labels":[]}]}' "$ppm")
+check "plan: an issue without a paired parent routes as before, split and risk gate included" '["agent:ready","risk:low"]|1|["needs:human","risk:high"]' \
+  "$(jq -c '.apply[0].add_labels | sort' <<<"$r")|$(jq '.apply[0].split_into | length' <<<"$r")|$(jq -c '.apply[1].add_labels | sort' <<<"$r")"
+r=$(vp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:low","agent:ready"],"remove_labels":[]}]}')
+check "plan: without the paired_parents argument nothing changes" '["agent:ready","risk:low"]' "$(jq -c '.apply[0].add_labels | sort' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":1,"add_labels":["risk:low","agent:ready"],"remove_labels":[]}]}' '{"1":"7","4":true}')
+check "plan: a paired parent that is not a number is ignored" '["agent:ready","risk:low"]' "$(jq -c '.apply[0].add_labels | sort' <<<"$r")"
+r=$(vpp "$curc" '{"actions":[{"issue":2,"add_labels":["agent:ready","type:bug"],"remove_labels":["needs:human"],"assessment":"a"}]}' "$ppm" '[2]')
+check "plan: Owner decision wins over a paired parent: no label changes, agent:paired not added" '{"add":[],"rm":[]}|1|0' \
+  "$(jq -c '{add: .apply[0].add_labels, rm: .apply[0].remove_labels}' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("Owner decision"))] | length' <<<"$r")|$(jq '[.apply[0].notes[] | select(contains("sub-issue of"))] | length' <<<"$r")"
+
+# End to end with a stubbed gh: all.json -> native parents -> candidates.json -> validated
+# plan -> gh calls. The stub answers the two GraphQL queries separately, so one can fail
+# without the other, and can refuse to add agent:paired (a repository without the label).
+pe=$(mktemp -d); mkdir -p "$pe/bin"
+cat > "$pe/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GHLOG"
+case "$1 $2" in
+  "issue list") printf '%s' "$S_ALL" ;;
+  "api graphql")
+    if [[ "$*" == *"parent {"* ]]; then
+      [[ -n "${S_PARENTS:-}" ]] || { echo "gh: HTTP 502" >&2; exit 1; }
+      printf '%s' "$S_PARENTS"
+    else
+      [[ -n "${S_BLOCKERS:-}" ]] || { echo "gh: HTTP 502" >&2; exit 1; }
+      printf '%s' "$S_BLOCKERS"
+    fi ;;
+  "issue edit")
+    if [[ -n "${S_NO_PAIRED_LABEL:-}" && "$*" == *"--add-label agent:paired"* ]]; then
+      echo "failed to update https://github.com/o/r/issues/$3: 'agent:paired' not found" >&2; exit 1
+    fi
+    echo "https://github.com/o/r/issues/$3" ;;
+  "issue comment") echo "https://github.com/o/r/issues/$3#issuecomment-1" ;;
+  "issue create")  echo "https://github.com/o/r/issues/900" ;;
+esac
+GH
+chmod +x "$pe/bin/gh"
+perun() { PATH="$pe/bin:$PATH" GHLOG="$pe/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe "$@"; }
+# Child 30 already carries needs:human and child 31 agent:ready, as after an earlier triage.
+pe_all=$(jq -c 'map(if .number == 30 then .labels = [{"name":"needs:human"}] elif .number == 31 then .labels = [{"name":"agent:ready"}] else . end) + [{"number":43,"title":"natively blocked","body":"Part of #5.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}]' <<<"$pc_in")
+pe_parents='{"data":{"repository":{"issues":{"nodes":[{"number":31,"parent":{"number":5,"repository":{"nameWithOwner":"o/r"}}},{"number":30,"parent":null}]}}}}'
+pe_blockers='{"data":{"repository":{"issues":{"nodes":[{"number":43,"blockedBy":{"totalCount":1,"nodes":[{"number":6,"state":"OPEN"}]}}]}}}}'
+pef() { jq -c --argjson n "$2" '[.[] | select(.number == $n) | .paired_parent]' "$1/candidates.json"; }
+
+out=$(S_PARENTS="$pe_parents" perun bash "$root/scripts/native-parents.sh" 2>/dev/null)
+check "native-parents.sh: prints the map" '{"31":5}' "$out"
+out=$(perun bash "$root/scripts/native-parents.sh" 2>"$pe/err"); rc=$?
+check "native-parents.sh: API down -> {} and exit 0, with a warning" '{} 0|1' "$out $rc|$(grep -c '^::warning::Could not read native sub-issue links' "$pe/err")"
+out=$(S_PARENTS='{"errors":[{"message":"nope"}]}' perun bash "$root/scripts/native-parents.sh" 2>/dev/null); rc=$?
+check "native-parents.sh: unusable answer -> {} and exit 0" '{} 0' "$out $rc"
+
+S_ALL="$pe_all" S_PARENTS="$pe_parents" S_BLOCKERS="$pe_blockers" perun bash "$root/scripts/backlog-candidates.sh" "$pe/w" >/dev/null 2>"$pe/err"; rc=$?
+check "backlog-candidates: both sources reach candidates.json, no warning" "0|[5]|[5]|[null]|0" \
+  "$rc|$(pef "$pe/w" 30)|$(pef "$pe/w" 31)|$(pef "$pe/w" 32)|$(grep -c '^::warning::' "$pe/err")"
+S_ALL="$pe_all" S_BLOCKERS="$pe_blockers" perun bash "$root/scripts/backlog-candidates.sh" "$pe/w2" >/dev/null 2>"$pe/err"; rc=$?
+check "backlog-candidates: parent lookup down -> one warning, exit 0, Part of #N still works" "0|1|[5]|[null]" \
+  "$rc|$(grep -c '^::warning::Could not read native sub-issue links' "$pe/err")|$(pef "$pe/w2" 30)|$(pef "$pe/w2" 31)"
+check "backlog-candidates: ... and native blockers are still honoured" "[]|true" "$(pef "$pe/w2" 43)|$(jq -c 'index(43) != null' "$pe/w2/blocked.json")"
+S_ALL="$pe_all" S_PARENTS="$pe_parents" perun bash "$root/scripts/backlog-candidates.sh" "$pe/w3" >/dev/null 2>"$pe/err"; rc=$?
+check "backlog-candidates: blocker lookup down -> the parent lookup still works" "0|[5]|1" \
+  "$rc|$(pef "$pe/w3" 31)|$(grep -c '^::warning::Could not read native issue dependencies' "$pe/err")"
+
+mkdir -p "$pe/w/claude"
+echo '{"summary":"s","actions":[
+  {"issue":5,"add_labels":["risk:medium","needs:human"],"remove_labels":[],"assessment":"the epic"},
+  {"issue":30,"add_labels":["risk:medium","type:feature","needs:human"],"remove_labels":[],"assessment":"child by text","question":"q"},
+  {"issue":31,"add_labels":["risk:low","type:bug","agent:ready"],"remove_labels":[],"assessment":"child by link","split_into":[{"title":"child","body":"part"}]},
+  {"issue":32,"add_labels":["risk:low","type:docs","agent:ready"],"remove_labels":[],"assessment":"not a child"}]}' > "$pe/w/claude/result.json"
+: > "$pe/log"
+out=$(DRY_RUN=false perun bash "$root/scripts/apply-backlog.sh" "$pe/w" 2>/dev/null); rc=$?
+check "apply (paired epic): exit 0; both children get agent:paired" "0|1|1" \
+  "$rc|$(grep -c '^issue edit 30 -R o/r --add-label agent:paired$' "$pe/log")|$(grep -c '^issue edit 31 -R o/r --add-label agent:paired$' "$pe/log")"
+check "apply (paired epic): ... keep risk and type, and lose the needs:human / agent:ready they had" "1|1" \
+  "$(grep -c '^issue edit 30 -R o/r --add-label risk:medium,type:feature --remove-label needs:human$' "$pe/log")|$(grep -c '^issue edit 31 -R o/r --add-label risk:low,type:bug --remove-label agent:ready$' "$pe/log")"
+check "apply (paired epic): ... and neither routing label is ever added to them" "0" "$(grep -E '^issue edit (30|31) ' "$pe/log" | grep -cE -- '--add-label [^ ]*(needs:human|agent:ready)')"
+check "apply (paired epic): ... are not split, and the comment names the epic" "0|2" "$(grep -c '^issue create ' "$pe/log")|$(grep -c '^- .*sub-issue of #5' "$pe/log")"
+check "apply (paired epic): the epic itself is handled as before (risk only, no label added to it)" "1|1" \
+  "$(grep -c '^issue edit 5 ' "$pe/log")|$(grep -c '^issue edit 5 -R o/r --add-label risk:medium$' "$pe/log")"
+check "apply (paired epic): an issue under an unpaired parent is routed as before" "1" "$(grep -c '^issue edit 32 -R o/r --add-label agent:ready,risk:low,type:docs$' "$pe/log")"
+check "apply (paired epic): the digest shows the label and the removal" "1|1" "$(grep -c '^- #30 +agent:paired,risk:medium,type:feature -needs:human$' <<<"$out")|$(grep -c '^- #31 +agent:paired,risk:low,type:bug -agent:ready$' <<<"$out")"
+
+# The repository has no agent:paired label: gh refuses that edit. The run must go on.
+: > "$pe/log"
+out=$(DRY_RUN=false S_NO_PAIRED_LABEL=1 perun bash "$root/scripts/apply-backlog.sh" "$pe/w" 2>"$pe/err"); rc=$?
+check "apply (label missing): the run does not abort" "0|1|1" "$rc|$(grep -c '^issue edit 32 -R o/r --add-label agent:ready,risk:low,type:docs$' "$pe/log")|$(grep -c '^- #32 ' <<<"$out")"
+check "apply (label missing): the other labels of the child are still applied, and its comment posted" "1|1" \
+  "$(grep -c '^issue edit 30 -R o/r --add-label risk:medium,type:feature --remove-label needs:human$' "$pe/log")|$(grep -c '^issue comment 30 ' "$pe/log")"
+check "apply (label missing): the digest says so on each child's line" "1|1" \
+  "$(grep -c '^- #30 +risk:medium,type:feature -needs:human (agent:paired could not be added; run scripts/bootstrap-labels.sh)$' <<<"$out")|$(grep -c '^- #31 +risk:low,type:bug -agent:ready (agent:paired could not be added; run scripts/bootstrap-labels.sh)$' <<<"$out")"
+check "apply (label missing): ... the comment says so too, and the log carries a warning per child" "2|2" \
+  "$(grep -c '^- agent:paired could not be added' "$pe/log")|$(grep -c '^::warning::Could not add agent:paired to #' "$pe/err")"
+check "apply (label missing): still neither needs:human nor agent:ready added to a child" "0" "$(grep -E '^issue edit (30|31) ' "$pe/log" | grep -cE -- '--add-label [^ ]*(needs:human|agent:ready)')"
+out=$(DRY_RUN=true perun bash "$root/scripts/apply-backlog.sh" "$pe/w" 2>/dev/null); rc=$?
+check "apply (paired epic): a dry run reports the label like a real one" "0|1" "$rc|$(grep -c '^- #30 +agent:paired,risk:medium,type:feature -needs:human$' <<<"$out")"
+rm -rf "$pe"
+check "backlog prompt: names the paired_parent fact and the rule for such an issue" "1|1" \
+  "$(grep -c 'has a number in `paired_parent`' "$root/prompts/backlog.md")|$(grep -c 'The script labels it `agent:paired`' "$root/prompts/backlog.md")"
+check "readme: the guardrails table and the pairing paragraph cover sub-issues" "1|1" \
+  "$(grep -c '^| Sub-issues of an `agent:paired` epic are labeled `agent:paired` by triage' "$root/README.md")|$(grep -c '^- \*\*Pairing with your own agent:\*\*.*Sub-issues of a paired epic' "$root/README.md")"
+
 # ---------- triage can never set a milestone ----------
 check "schema: the plan schema offers no milestone field anywhere" "0" \
   "$(jq '[paths | map(tostring) | join(".") | select(test("milestone"; "i"))] | length' "$root/schemas/backlog-plan.json")"
