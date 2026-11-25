@@ -1128,6 +1128,14 @@ check "owner decision: must begin the comment" "0" "$(od '[{"author":{"login":"t
 check "owner decision: comments the loop posts as the owner never count" "0" \
   "$(od '[{"author":{"login":"tonhe"},"body":"<!-- agent-assessment -->\nOwner decision: go"},{"author":{"login":"tonhe"},"body":"Owner decision: go\n<!-- agent-dev -->"}]')"
 check "owner decision: case matters" "0" "$(od '[{"author":{"login":"tonhe"},"body":"owner decision: x"}]')"
+odb() { jq -nc --arg b "$1" '[{author: {login: "tonhe"}, body: $b}]'; }
+check "owner decision: the phrase must end there: 'Owner decisions are pending' is not one" "0" "$(od "$(odb 'Owner decisions are pending, do not touch family.go yet.')")"
+check "owner decision: ... nor 'Owner decision-making' or 'Owner decisionless'" "0|0" "$(od "$(odb 'Owner decision-making is slow this week.')")|$(od "$(odb 'Owner decisionless')")"
+check "owner decision: ... nor a longer word behind closing markup" "0" "$(od "$(odb '**Owner decision**s are pending')")"
+i=0
+for b in 'Owner decision: x' 'Owner decision x' 'Owner decision' $'Owner decision\nx' $'Owner decision\r\nx' $'Owner decision\tx' '**Owner decision:** x' '**Owner decision**: x' '__Owner decision__' $'## Owner decision\nx'; do
+  i=$((i+1)); check "owner decision: followed by a colon, blank space or the end $i" "1" "$(od "$(odb "$b")")"
+done
 rp() { jq -c -L "$root/lib" --arg globs "$2" 'include "glob"; review_protected($globs; "tonhe") | [.status, (.matched | map(.file))]' <<<"$1"; }
 pglobs=$'internal/probe/family.go\ninternal/sysprobe/**\ncmd/via/*.go'
 check "review_protected: no globs -> off" '["off",[]]' "$(rp '{"files":["internal/probe/family.go"],"comments":[]}' $' \n')"
@@ -1200,6 +1208,26 @@ for l in agent:paired release stretch; do
   check "bootstrap-labels: $l is created" "1" "$(grep -c "^$l|" "$root/scripts/bootstrap-labels.sh")"
 done
 rm -rf "$gs"
+
+# ---------- backlog-digest.sh: what the Discord digest says when there is no digest.md ----------
+bw=$(mktemp -d); mkdir -p "$bw/claude"
+bd() { COUNT="$1" WORK="$2" JOB_STATUS="$3" GITHUB_REPOSITORY=o/r bash "$root/scripts/backlog-digest.sh" "$bw" 2>/dev/null; }
+check "digest: nothing to triage and no plan due -> says so" "**Backlog: r**|Nothing new to triage." "$(bd 0 false success | paste -sd'|' -)"
+out=$(bd 0 true failure)
+check "digest: planning-only night where Claude failed never says 'Nothing new to triage.'" "0|1|1" \
+  "$(grep -c 'Nothing new to triage' <<<"$out")|$(grep -c 'planning' <<<"$out")|$(grep -c 'status failure' <<<"$out")"
+check "digest: candidates but no digest -> the job status" "**Backlog: r** finished with status failure." "$(bd 3 true failure)"
+check "digest: the gather step itself failed (no outputs) -> the job status, not 'nothing new'" "**Backlog: r** finished with status failure." "$(bd '' '' failure)"
+: > "$bw/digest.md"
+check "digest: an empty digest.md is not a digest" "0" "$(bd 0 true failure | grep -c 'Nothing new to triage')"
+printf '**Backlog: r**\n- #1 +risk:low\n' > "$bw/digest.md"
+check "digest: digest.md is used as it is" "**Backlog: r**|- #1 +risk:low" "$(bd 1 true success | paste -sd'|' -)"
+echo '{"num_turns":7,"duration_ms":185000}' > "$bw/claude/usage.json"
+check "digest: Claude usage appended" "Claude: 7 turns, 3 min" "$(bd 1 true success | tail -1)"
+rm -rf "$bw"
+bl_yml="$root/.github/workflows/backlog.yml"
+check "backlog.yml: the Digest step uses the tested script and knows whether there was work" "1|1|0" \
+  "$(grep -c 'scripts/backlog-digest.sh' "$bl_yml")|$(grep -c '^          WORK: \${{ steps.gather.outputs.work }}$' "$bl_yml")|$(grep -c 'Nothing new to triage' "$bl_yml")"
 
 echo; echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]

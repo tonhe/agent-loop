@@ -184,7 +184,7 @@ When the active milestone has 3 or fewer open issues, the backlog run opens `Pla
 - **Proposal:** the next epic from the roadmap's ordered list, up to 5 unmilestoned features ranked by value and size, `stretch` issues worth promoting, and anything in the active milestone that should move out. Each item has a one-line size estimate and a recommendation.
 - **Roadmap:** `ROADMAP.md` at the repository root, or the path in `roadmap_path`. If the file does not exist the issue is still opened, without an epic, and says so.
 - **Guardrails:** the body is rendered by `lib/planning.jq`: an item naming an issue that was not offered for its section is dropped (and counted in the issue), titles come from your issues rather than from the model, model text is cut to single lines, and the result goes through `defang_base`. It is filed with the PAT in the existing apply step with the single label `needs:human`. The Plan issue is never triaged or worked afterwards. A proposal that cannot be rendered at all (the model returned the wrong shape) files nothing, the digest says `planning: proposal could not be rendered`, and triage is unaffected; it is asked for again the next night.
-- **Cost:** on a night when planning is due, Claude runs even if there is nothing to triage.
+- **Cost:** on a night when planning is due, Claude runs even if there is nothing to triage. If that run fails, the digest says planning was due and gives the job status; "Nothing new to triage." is only said when there was nothing for Claude to do (`scripts/backlog-digest.sh`).
 - **Dry run:** the proposal is asked for and reported; no issue is filed.
 - **Off switch:** `milestone_planning: false` on the backlog workflow.
 
@@ -199,7 +199,7 @@ When the active milestone has 3 or fewer open issues, the backlog run opens `Pla
         cmd/via/*.go
 ```
 
-When an agent PR changes a matching file, the review looks on the linked issue for a comment written by `owner_login` that begins with `Owner decision` (leading blank space and Markdown heading or bold marks are allowed; case matters) and names the approved scope, for example `Owner decision: family.go may change, only the fallback order.`
+When an agent PR changes a matching file, the review looks on the linked issue for a comment written by `owner_login` that begins with `Owner decision` (leading blank space and Markdown heading or bold marks are allowed; case matters) and names the approved scope, for example `Owner decision: family.go may change, only the fallback order.` The phrase has to stand on its own: after it comes a colon, a space, a line break or the end of the comment. A comment starting `Owner decisions are pending` or `Owner decision-making` is not a decision.
 
 - **No such comment:** `review-protected.sh` posts a blocking review comment listing each file and the pattern that protects it, and fails the `agent-review` check. Claude is not asked.
 - **A comment exists:** the matched files and your comment go into the review prompt, and the reviewer blocks if the diff goes beyond the scope you named, saying which files and why.
@@ -240,7 +240,7 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
+`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
 
 ## Known limits and residual risk
 

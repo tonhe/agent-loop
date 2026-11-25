@@ -162,13 +162,11 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           COUNT: ${{ steps.gather.outputs.count }}
+          WORK: ${{ steps.gather.outputs.work }}
           JOB_STATUS: ${{ job.status }}
         run: |
-          W="$RUNNER_TEMP/work"
-          if [[ -s "$W/digest.md" ]]; then msg=$(cat "$W/digest.md")
-          elif [[ "$COUNT" == "0" ]]; then msg="**Backlog: ${GITHUB_REPOSITORY#*/}**"$'\n'"Nothing new to triage."
-          else msg="**Backlog: ${GITHUB_REPOSITORY#*/}** finished with status $JOB_STATUS."; fi
-          if [[ -s "$W/claude/usage.json" ]]; then
-            msg+=$'\n'"Claude: $(jq -r '"\(.num_turns) turns, \(.duration_ms/60000 | floor) min"' "$W/claude/usage.json")"
-          fi
-          printf '%s\n<%s>\n' "$msg" "$RUN_URL" | "$RUNNER_TEMP/agent-loop/scripts/discord.sh"
+          # No digest.md (the apply step never ran): the script says "nothing new" only
+          # when there was no work, not on a planning-only night that failed.
+          L="$RUNNER_TEMP/agent-loop"
+          msg=$(bash "$L/scripts/backlog-digest.sh" "$RUNNER_TEMP/work")
+          printf '%s\n<%s>\n' "$msg" "$RUN_URL" | "$L/scripts/discord.sh"

@@ -38,11 +38,14 @@ def glob_hit($patterns):
 
 # owner_decisions($owner): [issue comments {author: {login}, body}] -> [bodies] of the
 # comments written by the owner that begin with "Owner decision" (leading whitespace
-# and Markdown heading or emphasis marks allowed). Comments the loop posts as the owner
-# (assessments, hand-backs) carry an "<!-- agent-" marker and never count.
+# and Markdown heading or emphasis marks allowed). The phrase must end there: after it,
+# and after any closing emphasis marks, comes a colon, blank space or the end of the
+# comment. "Owner decisions are pending" and "Owner decision-making" are not decisions.
+# Comments the loop posts as the owner (assessments, hand-backs) carry an "<!-- agent-"
+# marker and never count.
 def owner_decisions($owner):
   [.[] | select(.author.login == $owner) | (.body // "")
-       | select(test("\\A[ \\t\\r\\n#*_]*Owner decision") and (contains("<!-- agent-") | not))];
+       | select(test("\\A[ \\t\\r\\n#*_]*Owner decision[*_]*(:|[ \\t\\r\\n]|\\z)") and (contains("<!-- agent-") | not))];
 
 # review_protected($globs; $owner):
 #   {files: [changed paths, as git prints them], comments: [issue comments]}
