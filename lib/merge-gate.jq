@@ -27,7 +27,7 @@
 #                                          (its timeline, oldest first); pr.createdAt is
 #                                          when the PR opened
 #   "pr_label_events": [{event, created_at, label}],  the same for the PR
-#   "owner_approvals_trusted": false       optional, default false: see owner_merge_url.
+#   "owner_approvals_trusted": false       optional, default false: see "Owner-merge rule".
 #                                          merge-gate.sh writes the literal false; no env
 #                                          var, config or argument reaches it
 # }
@@ -90,15 +90,16 @@ def live_answers($owner; $sha):
 
 def labels_of: [(.labels // [])[].name];
 
-# Interim rule, until https://github.com/tonhe/agent-loop/issues/35 is done: agents act
-# as the owner on GitHub (the owner's gh login), so an "Owner decision" or "Live check
-# passed" comment by owner_login may have been written by an agent. Until agents have
-# their own identity, the gate trusts no owner approval and enables auto-merge only for
-# PRs that need none: issue risk:low, no protected_paths or protected_review_paths file,
-# no agent:live-check. Every other PR is refused with "needs owner merge" and left for
-# the owner. merge-gate.sh sets owner_approvals_trusted to false literally; the field
-# exists so the approval rules below stay tested for when #35 lands.
-def owner_merge_url: "https://github.com/tonhe/agent-loop/issues/35";
+# Owner-merge rule (permanent): agents act as the owner on GitHub (the owner's gh login),
+# so an "Owner decision" or "Live check passed" comment by owner_login may have been
+# written by an agent. A separate agent identity was considered and closed as not planned
+# (https://github.com/tonhe/agent-loop/issues/35). So the gate trusts no owner approval
+# and enables auto-merge only for PRs that need none: issue risk:low (unchanged since
+# the PR opened), no protected_paths or protected_review_paths file, no agent:live-check.
+# Every other PR is refused with "needs owner merge" and left for the owner to merge.
+# merge-gate.sh sets owner_approvals_trusted to the literal false. The approval rules
+# behind it (Owner decision, live-check answer) are kept and tested with it true, in case
+# the decision is ever reversed.
 
 def merge_gate:
   . as $in
@@ -150,14 +151,14 @@ def merge_gate:
        else ({files: ($in.files // []), comments: ($iss.comments // [])}
              | review_protected($in.protected_review_paths // ""; $in.owner)) as $rp
          | if ($trusted | not) then
-             ($rp.matched[] | "needs owner merge: changes \(.file | tojson) (protected_review_paths \(.glob)); an Owner decision cannot be verified while agents act as the owner (\(owner_merge_url))")
+             ($rp.matched[] | "needs owner merge: changes \(.file | tojson) (protected_review_paths \(.glob)); an Owner decision cannot be verified, because agents act as the owner")
            elif $rp.status == "no_decision" then
              ($rp.matched[] | "changes \(.file | tojson) (protected_review_paths \(.glob)) and issue #\($n) has no Owner decision comment")
            else empty end
        end),
       (if $trusted or $iss == null or $n == null or ($iss | type) != "object" then empty
        elif ($iss | labels_of | index("risk:low")) == null then
-         "needs owner merge: issue #\($n) is not risk:low (\([$iss | labels_of | .[] | select(startswith("risk:"))] | if length == 0 then "no risk label" else join(", ") end)); only risk:low PRs are merged by the gate until \(owner_merge_url) is done"
+         "needs owner merge: issue #\($n) is not risk:low (\([$iss | labels_of | .[] | select(startswith("risk:"))] | if length == 0 then "no risk label" else join(", ") end)); the gate merges only risk:low PRs, because agents act as the owner and no owner approval can be verified"
        else empty end),
 
       # --- risk label history ---
@@ -194,7 +195,7 @@ def merge_gate:
        else empty end),
       (if ($pr | labels_of | index("agent:live-check")) == null then empty
        elif ($trusted | not) then
-         "needs owner merge: labeled agent:live-check; the owner runs the live check and merges by hand, since a live-check answer cannot be verified while agents act as the owner (\(owner_merge_url))"
+         "needs owner merge: labeled agent:live-check; the owner runs the live check and merges by hand (agents act as the owner, so a live-check answer cannot be verified)"
        else (($pr.comments // []) | live_answers($in.owner; $pr.headRefOid // "")) as $a
          | if ($a | length) == 0 then "labeled agent:live-check and the owner has not posted \"Live check passed\" for head \($pr.headRefOid // "" | .[0:7])"
            elif $a[-1] != "passed" then "the owner's live check for head \($pr.headRefOid // "" | .[0:7]) failed"

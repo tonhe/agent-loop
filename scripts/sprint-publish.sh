@@ -7,8 +7,9 @@
 #      hooks off: nothing the agent wrote into .git runs, as in CI's clean checkout.
 #   3. check-diff.sh refuses protected_paths and .github/ there, as in CI.
 #   4. publish-pr.sh commits as the owner, pushes issue-N and opens the PR.
-#   5. A result with live_check labels the PR agent:live-check: merge-gate.sh then waits
-#      for the owner's "Live check passed <sha>" comment.
+#   5. A result with live_check labels the PR agent:live-check and comments the commands.
+#      The owner runs them and merges the PR by hand: merge-gate.sh never merges a
+#      live-check PR (the owner-merge rule, lib/merge-gate.jq).
 # The required checks on the PR (tests, lab, agent-review) are the verification; this
 # script does not run the tests again.
 # Usage: sprint-publish.sh ISSUE RESULT_JSON     (in the issue's worktree)
@@ -55,8 +56,8 @@ export PUSH_TOKEN; PUSH_TOKEN=$(gh auth token)
 pr=$(bash "$here/scripts/publish-pr.sh" "$n" "$result" | tail -1)
 if jq -e '.live_check.commands? // "" | length > 0' "$result" >/dev/null; then
   gh label create agent:live-check -R "$repo" --color fbca04 \
-    --description "Waits for the owner's live check before the merge gate allows it" >/dev/null 2>&1 || true
+    --description "Sprint PR waiting on the owner's live check; the owner merges it by hand" >/dev/null 2>&1 || true
   gh pr edit "$pr" -R "$repo" --add-label agent:live-check >/dev/null
-  gh pr comment "$pr" -R "$repo" --body "$(jq -r -L "$here/lib" 'include "meta"; "<!-- agent-sprint -->\n**Waiting on the owner'"'"'s live check.** \(.live_check.why // "" | defang_markers)\n\nRun on the PR head:\n\n```\n\(.live_check.commands | gsub("```"; "ʼʼʼ"))\n```\n\nThen comment `Live check passed <first 7 characters of the head commit>` (or `Live check failed ...`). Then merge it yourself: the merge gate leaves every live-check PR for you until https://github.com/tonhe/agent-loop/issues/35 is done."' "$result")" >/dev/null
+  gh pr comment "$pr" -R "$repo" --body "$(jq -r -L "$here/lib" 'include "meta"; "<!-- agent-sprint -->\n**Waiting on the owner'"'"'s live check.** \(.live_check.why // "" | defang_markers)\n\nRun on the PR head:\n\n```\n\(.live_check.commands | gsub("```"; "ʼʼʼ"))\n```\n\nThen comment `Live check passed <first 7 characters of the head commit>` (or `Live check failed ...`) for the record. If it passes, then merge the PR yourself. The merge gate never merges a live-check PR: agents act as the owner, so it cannot tell your answer from one an agent wrote."' "$result")" >/dev/null
 fi
 echo "$pr"
