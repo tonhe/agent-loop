@@ -72,6 +72,15 @@ check "select: picked up once #4 closes" "[20,21]" "$(jq -c --arg owner tonhe --
 cand_b='[{"number":20,"title":"t","body":"Blocked by #4.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
  {"number":21,"title":"t","body":"ok","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}]'
 check "candidates: blocked issue not sent to Claude" "[21]" "$(jq -c --arg owner tonhe --argjson max 25 --argjson open '[4,20,21]' -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$cand_b" | jq -c 'map(.number)')"
+# Once #4 closes, #20 is a candidate again, and its body still says "Blocked by #4." The
+# facts must tell the model that #4 is closed, or it triages the issue as still blocked.
+candf() { jq -c --arg owner tonhe --argjson max 25 --argjson open "$1" -L "$root/lib" -f "$root/lib/candidates.jq" <<<"$2" | jq -c 'map({number, closed_blockers})'; }
+check "candidates: a blocker that has closed is named as closed in the facts" '[{"number":20,"closed_blockers":[4]},{"number":21,"closed_blockers":[]}]' "$(candf '[20,21]' "$cand_b")"
+cand_c='[{"number":22,"title":"t","body":"Part of #16. Blocked by #4, and by #9. Do this after #7 merges. See #12.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]},
+ {"number":23,"title":"t","body":"This is not blocked by #4.","labels":[],"author":{"login":"tonhe"},"createdAt":"2026-01-01T00:00:00Z","comments":[]}]'
+check "candidates: every closed blocker is listed; plain references and negations are not" '[{"number":22,"closed_blockers":[4,7,9]},{"number":23,"closed_blockers":[]}]' "$(candf '[12,16,22,23]' "$cand_c")"
+check "backlog prompt: tells the model that closed_blockers are done and not a reason to hold" "1|1" \
+  "$(grep -c 'Each issue has a `closed_blockers` list' "$root/prompts/backlog.md")|$(grep -c 'Never write "Blocked by" for an issue in `closed_blockers`' "$root/prompts/backlog.md")"
 
 # ---------- validate-plan.jq ----------
 vp() { jq -c --argjson allowed '[1,2,3,4,5]' --argjson current "$1" --argjson allow_medium "${3:-false}" -f "$root/lib/validate-plan.jq" <<<"$2"; }
@@ -790,6 +799,33 @@ check "apply: applied issue listed" "1" "$(grep -c '^- #1 +risk:low,type:docs$' 
 echo '[]' > "$ab/w/candidates.json"; echo '{"summary":"s","actions":[]}' > "$ab/w/claude/result.json"
 out=$(abrun); rc=$?
 check "apply: no candidates and empty plan -> exit 0" "0" "$rc"
+
+# A real (not dry) run with a gh that prints what the real one prints: `gh issue edit` and
+# `gh issue comment` write the issue URL to stdout. None of that may reach the digest, which
+# is this script's stdout: Discord turns every bare URL into a preview card.
+cat > "$ab/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GHLOG"
+case "$1 $2" in
+  "issue edit")    echo "https://github.com/o/r/issues/$3" ;;
+  "issue comment") echo "https://github.com/o/r/issues/$3#issuecomment-1" ;;
+  "issue create")  echo "https://github.com/o/r/issues/900" ;;
+  "api "*)         if [[ "$*" == *PATCH* ]]; then echo '{"id":1}'; fi ;;
+esac
+GH
+jq -nc '[range(1; 26) | {number: ., title: "t"}]' > "$ab/w/candidates.json"
+jq -nc '[range(1; 26) | {key: tostring, value: []}] | from_entries' > "$ab/w/current-labels.json"
+jq -nc '{summary: "Triaged 25 issues.", actions: [range(1; 26) | {issue: ., add_labels: ["risk:low", "type:docs"], remove_labels: [], assessment: "ok"}
+          | if .issue == 3 then . + {split_into: [{title: "child", body: "do part"}]} else . end]}' > "$ab/w/claude/result.json"
+abreal() { : > "$ab/log"; PATH="$ab/bin:$PATH" GHLOG="$ab/log" GITHUB_REPOSITORY=o/r OWNER_LOGIN=tonhe DRY_RUN=false \
+             bash "$root/scripts/apply-backlog.sh" "$ab/w" 2>/dev/null; }
+out=$(abreal); rc=$?
+check "apply (real run): 25 issues edited, one split filed, exit 0" "0|26|1" "$rc|$(grep -c '^issue edit ' "$ab/log")|$(grep -c '^issue create ' "$ab/log")"
+check "apply (real run): no URL from gh leaks into the digest" "0" "$(grep -c 'https\?://' <<<"$out")"
+check "apply (real run): the digest starts with the header and the summary" "**Backlog: r**|Triaged 25 issues." "$(sed -n '1,2p' <<<"$out" | paste -sd'|' -)"
+check "apply (real run): one line per issue, none twice" "25|25" "$(grep -c '^- #[0-9]' <<<"$out")|$(grep '^- #[0-9]' <<<"$out" | sort -u | grep -c .)"
+check "apply (real run): the split is counted on its parent's line" "1" "$(grep -c '^- #3 +risk:low,type:docs split into 1$' <<<"$out")"
+check "apply (real run): the parent's comment still links the new issue" "1" "$(grep -c '^- https://github.com/o/r/issues/900$' "$ab/log")"
 rm -rf "$ab"
 
 # ---------- shared gh stub for the dependency, base-branch and milestone tests ----------
