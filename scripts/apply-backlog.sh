@@ -22,7 +22,11 @@ max_new=${MAX_NEW_ISSUES:-10}
 run() { if [[ $dry == true ]]; then echo "DRY: $*" >&2; else "$@" >&2; fi; }
 
 allowed=$(jq -c '[.[].number]' "$w/candidates.json")
+# Issues with an "Owner decision" comment (a fact from candidates.jq): validate-plan.jq
+# changes no label on them and files no split, so only the comment below is posted.
+decided=$(jq -c '[.[] | select(.owner_decision == true) | .number]' "$w/candidates.json")
 jq --argjson allowed "$allowed" \
+   --argjson decided "$decided" \
    --argjson current "$(cat "$w/current-labels.json")" \
    --argjson allow_medium "${ALLOW_MEDIUM_RISK:-false}" \
    -f "$here/lib/validate-plan.jq" "$w/claude/result.json" > "$w/validated.json"
