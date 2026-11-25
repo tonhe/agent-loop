@@ -92,6 +92,7 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 - **Rough idea:** file an issue. The backlog run expands it, asks questions, or splits it.
 - **Answering questions:** comment on the issue. Any comment from you triggers reassessment the next night. Comment `/reassess` to force it.
 - **Urgent:** add the `agent:urgent` label, or `gh workflow run agent-dev.yml -f issue=N`.
+- **The nightly selection, now:** `gh workflow run agent-dev.yml -f mode=scheduled` picks issues exactly as the nightly run does.
 - **Dependencies:** write `Blocked by #N.` in the issue, or mark it as blocked in the issue sidebar (GitHub's native issue dependencies). Either one is enough: the issue is skipped by triage and dev until every such blocker is closed. `not blocked by #N` and a quoted "Blocked by" are ignored. A manual run (`-f issue=N`) overrides both.
 - **Base branch:** to have an issue worked on a branch other than the default, put `Base: feat/my-branch` on a line of its own in the issue body, or add a label `base:feat/my-branch`. See "Per-issue base branch" below.
 - **Milestones:** the nightly dev run takes ready issues from the most pressing open milestone first, then other milestones, then issues without one. See "Order of work" below. Triage never assigns milestones; you do.
@@ -313,12 +314,12 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean.
+`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean. The Worker has its own tests: `npm test` in `worker/` (Node 20 or later, no dependencies).
 
 ## Known limits and residual risk
 
 - The Claude token is in the environment while Claude runs tests it wrote. Only your own issues reach that step, so a hostile prompt would have to come from you. A leaked token costs usage, not code.
-- GitHub scheduled runs can start late under load.
+- GitHub's `schedule:` trigger is best effort. On one repo it started runs 6 to 12 hours late and dropped most slots of a three-hourly job. If that happens, remove the `schedule:` blocks from the callers and start the workflows from outside: `worker/` is a Cloudflare Worker that does it, checks that each run was created, and reports failures to Discord.
 - Native dependencies are read up to 50 blockers per issue; an issue with more is treated as blocked.
 - A PR against a non-default base does not close its issue on merge (see "Per-issue base branch").
 - Release issues read the commit list through the compare API and open issues up to 500; planning reads the first 200 open issues.

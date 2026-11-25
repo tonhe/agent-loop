@@ -1,13 +1,22 @@
 # TEMPLATE: copy to .github/workflows/ and change the lines marked CHANGE.
 # Dev agent: nightly on agent:ready issues, on demand, or when you label an issue agent:urgent.
-#   On demand: gh workflow run agent-dev.yml -f issue=42
+#   One issue now:         gh workflow run agent-dev.yml -f issue=42
+#   The nightly selection: gh workflow run agent-dev.yml -f mode=scheduled
 name: agent-dev
 on:
+  # GitHub's schedule is best effort and can start hours late or not at all. If it does on
+  # your repo, delete this block and start the run from outside with mode=scheduled
+  # (see worker/ in tonhe/agent-loop). Do not keep both, or a late run doubles up.
   schedule:
     - cron: '17 7 * * *'   # ~2:17 AM Eastern
   workflow_dispatch:
     inputs:
-      issue: {description: "Issue number to work now", required: true}
+      mode:
+        description: "scheduled = the nightly selection; manual and urgent need an issue number"
+        type: choice
+        options: [manual, scheduled, urgent]
+        default: manual
+      issue: {description: "Issue number (manual and urgent only)", required: false}
   issues:
     types: [labeled]
 permissions:
@@ -24,8 +33,10 @@ jobs:
     uses: tonhe/agent-loop/.github/workflows/dev.yml@v1
     with:
       loop_ref: v1
-      mode: ${{ github.event_name == 'schedule' && 'scheduled' || (github.event_name == 'issues' && 'urgent' || 'manual') }}
-      issue: ${{ github.event.inputs.issue || github.event.issue.number || '' }}
+      # The schedule runs the nightly selection, a label event is urgent, and a manual start
+      # runs in the mode it names. The nightly selection ignores any issue number.
+      mode: ${{ github.event_name == 'schedule' && 'scheduled' || (github.event_name == 'issues' && 'urgent' || github.event.inputs.mode || 'manual') }}
+      issue: ${{ github.event.inputs.mode != 'scheduled' && (github.event.inputs.issue || github.event.issue.number) || '' }}
       owner_login: tonhe                 # CHANGE: your GitHub login
       git_author_name: tonhe             # CHANGE: commit author name
       git_author_email: you@example.com   # CHANGE: an email linked to your GitHub account
