@@ -23,7 +23,9 @@ On every tick the Worker takes the time from the tick itself (the event's `sched
 3. Checks every row that was due 10 minutes earlier: it lists that workflow's manually started runs created since the start time, and posts to Discord if there are none. So the checks happen at 06:27, 07:27, 01:57 and 13:57. Nothing is stored between ticks; the check is worked out from the same table.
 4. On the 06:17 tick, reads the `github-authentication-token-expiration` header from GitHub's response and posts to Discord if the token has fewer than 14 days left.
 
-There are no retries. If a tick is skipped, the next tick's check finds no run and alerts.
+A check is always one whole tick after its start, never on the same tick, so GitHub has ten minutes to register the run. A check is also skipped when its start was scheduled before the running version of the Worker was deployed (Cloudflare's version metadata gives that time): this Worker never made that start, so the first tick after a deploy cannot alert about it. Changing a secret also creates a new version.
+
+There are no retries. If a tick is skipped, the next tick's check finds no run and alerts. Nothing is stored, so a check does not know whether its start was actually sent: a start that GitHub refused is reported twice, once by the start and once by the check.
 
 A night with no message means everything started. If Discord itself refuses a message, the invocation fails and shows as an error in the Worker's logs in the Cloudflare dashboard.
 
@@ -62,12 +64,15 @@ Use the webhook the loop already posts to (the repo's `DISCORD_WEBHOOK_URL` secr
 
 This runs the Worker on your machine with the real token, so every start below creates a real workflow run.
 
-In this directory, create a file named `.dev.vars` (it is in `.gitignore`):
+In this directory, create a file named `.dev.vars` (it is in `.gitignore`). One `NAME=value` per line, no quotes:
 
 ```
 GITHUB_TOKEN=github_pat_...
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+TEST_CHECK_ALL=1
 ```
+
+`TEST_CHECK_ALL` is for this local test only. The local Worker counts as deployed when it starts, so without it every check `tick.sh` fires is skipped as "from before the deploy". Never set it on the deployed Worker.
 
 Terminal 1:
 
@@ -76,7 +81,7 @@ npm test
 npx wrangler dev --test-scheduled
 ```
 
-Terminal 2, once terminal 1 says `Ready on http://localhost:8787`. Each line fires one tick; a start, then its check:
+Terminal 2, once terminal 1 says `Ready on http://localhost:8787`. Each line fires one tick; a start, then its check. Run them one at a time and **wait about 30 seconds between a start and its check**: GitHub takes a few seconds to register a run, and a check fired straight after its start reports "no run has been created" although the run is on its way. (Deployed, the check comes ten minutes later.)
 
 ```sh
 ./tick.sh 06:17    # starts agent-backlog (and reads the token's expiry)
@@ -96,7 +101,7 @@ Terminal 2, once terminal 1 says `Ready on http://localhost:8787`. Each line fir
 {"time":"06:27","started":[],"checked":["tonhe/viaduct agent-backlog.yml"],"problems":[]}
 ```
 
-A start must list the workflow under `started`, its check under `checked`, and `problems` must be empty. Anything in `problems` is also posted to Discord.
+A start must list the workflow under `started`, its check under `checked`, and `problems` must be empty. A workflow under `skipped` means the check was not made because `TEST_CHECK_ALL` is missing. Anything in `problems` is also posted to Discord.
 
 Two things to know:
 

@@ -1,7 +1,7 @@
 // Cloudflare Worker: starts the agent-loop workflows on a schedule, because
 // GitHub's own schedule starts them hours late or not at all. See README.md.
 import { schedule, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "./config.js";
-import { runTick } from "./core.js";
+import { deployTime, runTick } from "./core.js";
 
 export default {
   async scheduled(event, env, ctx) {
@@ -13,8 +13,12 @@ export default {
       checkAfterMinutes: CHECK_AFTER_MINUTES,
       tokenCheckAt: TOKEN_CHECK_AT,
       tokenWarnDays: TOKEN_WARN_DAYS,
+      // A check never reaches back before this version was deployed.
+      // TEST_CHECK_ALL (local .dev.vars only) lifts that, so tick.sh can
+      // exercise a check for a time before `wrangler dev` started.
+      deployedAt: env.TEST_CHECK_ALL ? null : deployTime(env.CF_VERSION_METADATA),
     });
-    if (result.started.length || result.checked.length || result.problems.length) {
+    if (result.started.length || result.checked.length || result.skipped.length || result.problems.length) {
       console.log(JSON.stringify(result));
     }
   },

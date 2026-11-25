@@ -14,16 +14,32 @@ export function tickTime(scheduledTime) {
 //   start  rows whose time of day equals the tick
 //   check  rows started checkAfterMinutes before the tick, each with `since`,
 //          the time that start was scheduled for (it may be the previous day)
-export function dueAt(schedule, scheduledTime, checkAfterMinutes) {
+//   skipped  the same, for starts scheduled before this version of the Worker
+//          was deployed: this Worker never made them, so it does not ask
+//          where their runs are. deployedAt is epoch ms, or null if unknown.
+// A check is always one whole tick after its start, never on the same tick.
+export function dueAt(schedule, scheduledTime, checkAfterMinutes, deployedAt = null) {
   const now = tickTime(scheduledTime);
   const sinceMs = scheduledTime - checkAfterMinutes * MINUTE_MS;
   const earlier = tickTime(sinceMs);
   const since = new Date(sinceMs);
+  const due = schedule.filter((row) => row.at.includes(earlier)).map((row) => ({ row, since }));
+  const beforeDeploy = deployedAt != null && sinceMs < deployedAt;
   return {
     time: now,
     start: schedule.filter((row) => row.at.includes(now)),
-    check: schedule.filter((row) => row.at.includes(earlier)).map((row) => ({ row, since })),
+    check: beforeDeploy ? [] : due,
+    skipped: beforeDeploy ? due : [],
   };
+}
+
+// When this version of the Worker was deployed (epoch ms), from Cloudflare's
+// version metadata binding. null when it is absent or unreadable.
+export function deployTime(metadata) {
+  const ts = metadata && metadata.timestamp;
+  if (!ts) return null;
+  const ms = new Date(ts).getTime();
+  return Number.isNaN(ms) ? null : ms;
 }
 
 function githubHeaders(token) {
@@ -146,11 +162,11 @@ export async function alertDiscord(problems, { fetch, webhook }) {
 // One tick: start what is due now, check what was started a few minutes ago,
 // and report every problem in one Discord message. Most ticks have nothing
 // due and make no request at all. No retries.
-// Returns { time, started, checked, problems }.
-export async function runTick({ scheduledTime, schedule, env, fetch, checkAfterMinutes, tokenCheckAt, tokenWarnDays }) {
-  const due = dueAt(schedule, scheduledTime, checkAfterMinutes);
+// Returns { time, started, checked, skipped, problems }.
+export async function runTick({ scheduledTime, schedule, env, fetch, checkAfterMinutes, tokenCheckAt, tokenWarnDays, deployedAt = null }) {
+  const due = dueAt(schedule, scheduledTime, checkAfterMinutes, deployedAt);
   const tokenCheck = due.time === tokenCheckAt;
-  const result = { time: due.time, started: [], checked: [], problems: [] };
+  const result = { time: due.time, started: [], checked: [], skipped: due.skipped.map((c) => rowName(c.row)), problems: [] };
   if (due.start.length === 0 && due.check.length === 0 && !tokenCheck) return result;
 
   const gh = { fetch, token: env.GITHUB_TOKEN, api: env.GITHUB_API || "https://api.github.com" };

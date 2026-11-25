@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { schedule, TRIGGER, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "../src/config.js";
-import { alertDiscord, checkRow, dueAt, parseTokenExpiry, runTick, startRow, tickTime, tokenExpiryWarning } from "../src/core.js";
+import { alertDiscord, checkRow, deployTime, dueAt, parseTokenExpiry, runTick, startRow, tickTime, tokenExpiryWarning } from "../src/core.js";
 
 const API = "https://api.github.test";
 const HOOK = "https://discord.test/hook";
@@ -41,8 +41,8 @@ function tick(scheduledTime, fetch, over = {}) {
 // ---- what is due at a tick ----
 
 test("dueAt: a row starts on the tick equal to its time", () => {
-  assert.deepEqual(dueAt(table, utc(6, 17), 10), { time: "06:17", start: [triage], check: [] });
-  assert.deepEqual(dueAt(table, utc(7, 17), 10), { time: "07:17", start: [dev], check: [] });
+  assert.deepEqual(dueAt(table, utc(6, 17), 10), { time: "06:17", start: [triage], check: [], skipped: [] });
+  assert.deepEqual(dueAt(table, utc(7, 17), 10), { time: "07:17", start: [dev], check: [], skipped: [] });
 });
 
 test("dueAt: a row with two times starts on both", () => {
@@ -51,7 +51,7 @@ test("dueAt: a row with two times starts on both", () => {
 });
 
 test("dueAt: the tick 10 minutes after a start checks it, since the start's time", () => {
-  assert.deepEqual(dueAt(table, utc(6, 27), 10), { time: "06:27", start: [], check: [{ row: triage, since: new Date(utc(6, 17)) }] });
+  assert.deepEqual(dueAt(table, utc(6, 27), 10), { time: "06:27", start: [], check: [{ row: triage, since: new Date(utc(6, 17)) }], skipped: [] });
   assert.deepEqual(dueAt(table, utc(7, 27), 10).check, [{ row: dev, since: new Date(utc(7, 17)) }]);
   assert.deepEqual(dueAt(table, utc(1, 57), 10).check, [{ row: sweep, since: new Date(utc(1, 47)) }]);
   assert.deepEqual(dueAt(table, utc(13, 57), 10).check, [{ row: sweep, since: new Date(utc(13, 47)) }]);
@@ -65,26 +65,95 @@ test("dueAt: most ticks have nothing due", () => {
 });
 
 test("dueAt: a start at 23:57 is checked on the 00:07 tick of the next day", () => {
-  assert.deepEqual(dueAt(table, utc(23, 57, 26), 10), { time: "23:57", start: [late], check: [] });
-  assert.deepEqual(dueAt(table, utc(0, 7, 27), 10), { time: "00:07", start: [], check: [{ row: late, since: new Date(utc(23, 57, 26)) }] });
+  assert.deepEqual(dueAt(table, utc(23, 57, 26), 10), { time: "23:57", start: [late], check: [], skipped: [] });
+  assert.deepEqual(dueAt(table, utc(0, 7, 27), 10), { time: "00:07", start: [], check: [{ row: late, since: new Date(utc(23, 57, 26)) }], skipped: [] });
 });
 
 test("dueAt: a start at 00:07 runs on the midnight-hour tick and is checked at 00:17", () => {
   const first = { at: ["00:07"], repo: "o/r", workflow: "x.yml", body: { ref: "main" } };
-  assert.deepEqual(dueAt([first], utc(0, 7, 27), 10), { time: "00:07", start: [first], check: [] });
+  assert.deepEqual(dueAt([first], utc(0, 7, 27), 10), { time: "00:07", start: [first], check: [], skipped: [] });
   assert.deepEqual(dueAt([first], utc(0, 17, 27), 10).check, [{ row: first, since: new Date(utc(0, 7, 27)) }]);
-  assert.deepEqual(dueAt([first], utc(23, 57, 26), 10), { time: "23:57", start: [], check: [] });
+  assert.deepEqual(dueAt([first], utc(23, 57, 26), 10), { time: "23:57", start: [], check: [], skipped: [] });
 });
 
 test("dueAt: one tick can start one row and check another", () => {
   const a = { at: ["06:17"], repo: "o/r", workflow: "a.yml", body: {} };
   const b = { at: ["06:27"], repo: "o/r", workflow: "b.yml", body: {} };
-  assert.deepEqual(dueAt([a, b], utc(6, 27), 10), { time: "06:27", start: [b], check: [{ row: a, since: new Date(utc(6, 17)) }] });
+  assert.deepEqual(dueAt([a, b], utc(6, 27), 10), { time: "06:27", start: [b], check: [{ row: a, since: new Date(utc(6, 17)) }], skipped: [] });
 });
 
 test("dueAt: the time comes from the tick, seconds and all, not from the clock", () => {
   assert.equal(tickTime(Date.UTC(2026, 10, 26, 6, 17, 42)), "06:17");
   assert.deepEqual(dueAt(table, Date.UTC(2031, 0, 1, 6, 17, 0), 10).start, [triage]);
+});
+
+// ---- checks never reach back before this Worker was deployed ----
+
+test("dueAt: the first tick after a deploy does not check a start from before the deploy", () => {
+  // Deployed at 06:20. The 06:17 start was never made by this Worker.
+  const deployedAt = utc(6, 20);
+  const due = dueAt(table, utc(6, 27), 10, deployedAt);
+  assert.deepEqual(due.check, []);
+  assert.deepEqual(due.skipped, [{ row: triage, since: new Date(utc(6, 17)) }]);
+  assert.deepEqual(due.start, []);
+});
+
+test("dueAt: the first tick after a deploy still starts what is due on it", () => {
+  const due = dueAt(table, utc(7, 17), 10, utc(7, 12));
+  assert.deepEqual(due.start, [dev]);
+  assert.deepEqual([due.check, due.skipped], [[], []]);
+});
+
+test("dueAt: a start made after the deploy is checked on the next tick, and every day after", () => {
+  const deployedAt = utc(7, 12);
+  assert.deepEqual(dueAt(table, utc(7, 27), 10, deployedAt).check, [{ row: dev, since: new Date(utc(7, 17)) }]);
+  assert.deepEqual(dueAt(table, utc(6, 27, 27), 10, deployedAt).check, [{ row: triage, since: new Date(utc(6, 17, 27)) }]);
+  assert.deepEqual(dueAt(table, utc(6, 27, 27), 10, deployedAt).skipped, []);
+});
+
+test("dueAt: a deploy in the same minute as a start still counts that start as this Worker's", () => {
+  // Version created at 06:17:00 exactly: the 06:17 tick ran on it.
+  assert.equal(dueAt(table, utc(6, 27), 10, utc(6, 17)).check.length, 1);
+  // Created 30 seconds into the minute: the 06:17 tick ran on the old version.
+  assert.equal(dueAt(table, utc(6, 27), 10, utc(6, 17) + 30_000).check.length, 0);
+});
+
+test("dueAt: a check is never due on the tick of its own start", () => {
+  for (let h = 0; h < 24; h++) {
+    for (let m = 7; m < 60; m += 10) {
+      const due = dueAt(table, utc(h, m), 10);
+      for (const c of due.check) assert.ok(!due.start.includes(c.row), `${due.time} ${c.row.workflow}`);
+    }
+  }
+});
+
+test("dueAt: with no deploy time known, checks run as the table says", () => {
+  assert.equal(dueAt(table, utc(6, 27), 10, null).check.length, 1);
+  assert.equal(dueAt(table, utc(6, 27), 10).check.length, 1);
+  assert.deepEqual(dueAt(table, utc(6, 27), 10).skipped, []);
+});
+
+test("deployTime: reads the version's timestamp, and nothing from junk", () => {
+  assert.equal(deployTime({ timestamp: "2026-11-25T15:02:47.514Z" }), Date.UTC(2026, 10, 25, 15, 2, 47, 514));
+  assert.equal(deployTime({ timestamp: new Date(utc(6, 20)) }), utc(6, 20));
+  assert.equal(deployTime({ timestamp: "" }), null);
+  assert.equal(deployTime({ timestamp: "soon" }), null);
+  assert.equal(deployTime({}), null);
+  assert.equal(deployTime(undefined), null);
+});
+
+test("runTick: the first check tick after a deploy asks GitHub nothing and alerts nobody", async () => {
+  const f = fakeFetch([]);
+  const r = await tick(utc(6, 27), f, { deployedAt: utc(6, 20) });
+  assert.deepEqual(r, { time: "06:27", started: [], checked: [], skipped: ["o/r agent-backlog.yml"], problems: [] });
+  assert.equal(f.calls.length, 0);
+});
+
+test("runTick: the next night's check after that deploy runs", async () => {
+  const f = fakeFetch([["/runs", { status: 200, body: '{"total_count":1}' }]]);
+  const r = await tick(utc(6, 27, 27), f, { deployedAt: utc(6, 20) });
+  assert.deepEqual(r.checked, ["o/r agent-backlog.yml"]);
+  assert.deepEqual(r.skipped, []);
 });
 
 // ---- the real table and wrangler.toml ----
@@ -240,14 +309,14 @@ test("alertDiscord: one message with every problem; a refusal throws", async () 
 test("runTick: a tick with nothing due makes no request at all", async () => {
   const f = fakeFetch([]);
   const r = await tick(utc(9, 37), f);
-  assert.deepEqual(r, { time: "09:37", started: [], checked: [], problems: [] });
+  assert.deepEqual(r, { time: "09:37", started: [], checked: [], skipped: [], problems: [] });
   assert.equal(f.calls.length, 0);
 });
 
 test("runTick: the 07:17 tick starts dev and is quiet on 204", async () => {
   const f = fakeFetch([["/dispatches", { status: 204 }]]);
   const r = await tick(utc(7, 17), f);
-  assert.deepEqual(r, { time: "07:17", started: ["o/r agent-dev.yml"], checked: [], problems: [] });
+  assert.deepEqual(r, { time: "07:17", started: ["o/r agent-dev.yml"], checked: [], skipped: [], problems: [] });
   assert.equal(f.calls.length, 1);
   assert.match(f.calls[0].url, /agent-dev\.yml\/dispatches$/);
 });
@@ -273,7 +342,7 @@ test("runTick: the 07:27 tick checks dev since 07:17 and alerts when no run exis
 test("runTick: the check is quiet when the run exists", async () => {
   const f = fakeFetch([["/runs", { status: 200, body: '{"total_count":1}' }]]);
   const r = await tick(utc(7, 27), f);
-  assert.deepEqual(r, { time: "07:27", started: [], checked: ["o/r agent-dev.yml"], problems: [] });
+  assert.deepEqual(r, { time: "07:27", started: [], checked: ["o/r agent-dev.yml"], skipped: [], problems: [] });
   assert.equal(f.calls.length, 1);
 });
 
