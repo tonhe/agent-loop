@@ -1,13 +1,16 @@
 // Cloudflare Worker: starts the agent-loop workflows on a schedule, because
 // GitHub's own schedule starts them hours late or not at all. See README.md.
-import { schedule, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "./config.js";
-import { deployTime, runTick } from "./core.js";
+import { schedule, sprintSchedule, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "./config.js";
+import { activeSchedule, deployTime, runTick } from "./core.js";
 
 export default {
   async scheduled(event, env, ctx) {
+    // The sprint switch: the SPRINT variable, "on" or anything else (off).
+    const active = activeSchedule(schedule, sprintSchedule, env.SPRINT);
+    if (active.warning) console.warn(active.warning);
     const result = await runTick({
       scheduledTime: event.scheduledTime, // the tick's time, not the clock
-      schedule,
+      schedule: active.rows,
       env,
       fetch: (...args) => fetch(...args),
       checkAfterMinutes: CHECK_AFTER_MINUTES,
