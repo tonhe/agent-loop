@@ -25,8 +25,12 @@ allowed=$(jq -c '[.[].number]' "$w/candidates.json")
 # Issues with an "Owner decision" comment (a fact from candidates.jq): validate-plan.jq
 # changes no label on them and files no split, so only the comment below is posted.
 decided=$(jq -c '[.[] | select(.owner_decision == true) | .number]' "$w/candidates.json")
+# Sub-issues of an agent:paired epic (the paired_parent fact from candidates.jq):
+# validate-plan.jq labels them agent:paired and routes them nowhere else.
+paired_parents=$(jq -c '[.[] | select((.paired_parent | type) == "number") | {key: (.number | tostring), value: .paired_parent}] | from_entries' "$w/candidates.json")
 jq --argjson allowed "$allowed" \
    --argjson decided "$decided" \
+   --argjson paired_parents "$paired_parents" \
    --argjson current "$(cat "$w/current-labels.json")" \
    --argjson allow_medium "${ALLOW_MEDIUM_RISK:-false}" \
    -f "$here/lib/validate-plan.jq" "$w/claude/result.json" > "$w/validated.json"
@@ -35,12 +39,27 @@ new_issues=0
 digest=()
 while read -r a; do
   n=$(jq -r '.issue' <<<"$a")
-  add=$(jq -r '.add_labels | join(",")' <<<"$a")
+  # agent:paired (validate-plan.jq adds it to a sub-issue of a paired epic) is applied in
+  # a call of its own, below; $add holds the other labels.
+  add=$(jq -r '.add_labels - ["agent:paired"] | join(",")' <<<"$a")
   rm_=$(jq -r '.remove_labels | join(",")' <<<"$a")
   args=()
   [[ -n $add ]] && args+=(--add-label "$add")
   [[ -n $rm_ ]] && args+=(--remove-label "$rm_")
   (( ${#args[@]} )) && run gh issue edit "$n" -R "$repo" "${args[@]}"
+  # A repository that never ran bootstrap-labels.sh since agent:paired exists has no such
+  # label, and gh then refuses the edit. Under set -e that would end the whole run, so
+  # this one addition may fail: the issue keeps its other labels (never agent:ready or
+  # needs:human, which validate-plan.jq already dropped) and the digest says so.
+  pair_failed=false
+  if [[ $(jq -r '.add_labels | index("agent:paired") != null' <<<"$a") == true ]]; then
+    if run gh issue edit "$n" -R "$repo" --add-label agent:paired; then
+      add="agent:paired${add:+,$add}"
+    else
+      pair_failed=true
+      echo "::warning::Could not add agent:paired to #$n. If the label does not exist, run scripts/bootstrap-labels.sh." >&2
+    fi
+  fi
 
   # One assessment comment per issue, updated in place. The issue body is never touched.
   body=""
@@ -51,6 +70,7 @@ while read -r a; do
     body+=$'\n### Questions\n\n'"$(jq -r '.question' <<<"$a")"$'\n'
   fi
   notes=$(jq -r '.notes | map("- " + .) | join("\n")' <<<"$a")
+  [[ $pair_failed == true ]] && notes+=$'\n- agent:paired could not be added to this issue (does the label exist? run scripts/bootstrap-labels.sh); it has no routing label for now'
   [[ -n $notes ]] && body+=$'\n### Guardrail notes\n\n'"$notes"$'\n'
 
   # Splits: new issues filed as the owner, linked to the parent, left unlabeled for the next run.
@@ -86,6 +106,7 @@ while read -r a; do
   [[ -n $add ]] && label_note+=" +$add"
   [[ -n $rm_ ]] && label_note+=" -$rm_"
   [[ ${#children[@]} -gt 0 ]] && label_note+=" split into ${#children[@]}"
+  [[ $pair_failed == true ]] && label_note+=" (agent:paired could not be added; run scripts/bootstrap-labels.sh)"
   digest+=("- #$n${label_note:- assessed}")
 done < <(jq -c '.apply[]' "$w/validated.json")
 
