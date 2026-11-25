@@ -57,9 +57,9 @@ def _leaves($d; $mf; $ml):
       + [ map(select((.parts | length) > $d + 1)) | group_by(.parts[$d])[] | _leaves($d + 1; $mf; $ml)[] ]
   end;
 
-def _bin: {names: [.name], paths: (.files | map(.path)), files: (.files | length), lines: (.files | _lines)};
+def _bin: {names: [.name], paths: (.files | map(.path)), plines: (.files | map(.lines)), files: (.files | length), lines: (.files | _lines)};
 def _merge($a; $b):
-  {names: ($a.names + $b.names), paths: ($a.paths + $b.paths), files: ($a.files + $b.files), lines: ($a.lines + $b.lines)};
+  {names: ($a.names + $b.names), paths: ($a.paths + $b.paths), plines: ($a.plines + $b.plines), files: ($a.files + $b.files), lines: ($a.lines + $b.lines)};
 
 # First fit, in path order: a group joins the first earlier bin it fits into.
 def _pack($mf; $ml):
@@ -96,4 +96,35 @@ def split_plan($max_files; $max_lines; $max_calls):
   | $t + {split: (($groups | length) > 1),
           capped: (($packed | length) > $mc),
           uncapped: ($packed | length),
-          groups: ($groups | map({name: _name, paths, files, lines}))};
+          groups: ($groups | map({name: _name, paths, plines, files, lines}))};
+# plines: changed lines per path, in the order of paths (refine_plan needs them).
+
+# refine_plan($sizes; $cap; $max_calls): a plan -> a plan in which a group whose diff is
+# larger than $cap bytes is cut, in path order, into runs of files whose diffs fit.
+#   $sizes: {"<group index>": [diff bytes per path, in the order of that group's paths]},
+#           given only for the groups that are over the cap (review-prompts.sh measures).
+# Nothing is dropped: the point is that no diff has to be truncated when a finer split
+# avoids it. Two limits remain, and both leave a group over the cap for the caller to
+# deal with: a single file cannot be split, and the plan never grows beyond $max_calls
+# groups (when the room runs out, the last run takes the rest of the files).
+def refine_plan($sizes; $cap; $max_calls):
+  . as $plan
+  | (reduce (.groups | to_entries[]) as $e ({out: [], extra: 0};
+      $sizes[$e.key | tostring] as $s
+      | ([$max_calls - ($plan.groups | length) - .extra, 0] | max) as $room
+      | if $s == null or ($e.value.paths | length) < 2 or $room < 1 then .out += [$e.value]
+        else
+          ( [range(0; $e.value.paths | length) as $k
+              | {path: $e.value.paths[$k], lines: ($e.value.plines[$k] // 0), bytes: ($s[$k] // 0)}]
+            | reduce .[] as $f ([];
+                if length > 0 and (length > $room or ((.[-1] | map(.bytes) | add) + $f.bytes) <= $cap)
+                then .[:-1] + [.[-1] + [$f]] else . + [[$f]] end) ) as $chunks
+          | ($chunks | length) as $n
+          | .extra += $n - 1
+          | .out += [ $chunks | to_entries[]
+                      | {name: (if $n > 1 then "\($e.value.name) (part \(.key + 1)/\($n))" else $e.value.name end),
+                         paths: (.value | map(.path)), plines: (.value | map(.lines)),
+                         files: (.value | length), lines: (.value | map(.lines) | add)} ]
+        end)
+     | .out) as $groups
+  | $plan + {groups: $groups, split: (($groups | length) > 1)};

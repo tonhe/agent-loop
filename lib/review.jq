@@ -86,7 +86,11 @@ def _finding:
 # review_combine: everything known after the Claude calls -> the one comment to post.
 #   {mode: "loop"|"owner",
 #    plan: lib/split.jq's plan (paths not needed) | null when no plan was made,
-#    calls: [{rc, result, truncated}], one per plan group, in order,
+#    calls: [{rc, result, truncated, cut_files}], one per plan group, in order;
+#           truncated: that group's diff was cut at the byte cap, cut_files: the files
+#           (as git prints their names) that were not fully shown,
+#    uncovered: [names, as git prints them] of changed files that are in no group's
+#           diff (review-prompts.sh's coverage check),
 #    protected: owner mode's script-written protected-path section ("" = none),
 #    linked: [issue numbers used as context] | null (owner mode),
 #    head: short commit id | ""}
@@ -94,7 +98,9 @@ def _finding:
 #
 # A group counts when its call exited 0 and returned a valid review. The verdict is the
 # worst of the groups that count: "block" if any blocks, "pass" if all of them pass,
-# "none" if no group counts. complete is true only when every group counts. Whether an
+# "none" if no group counts. complete is true only when every group counts, no diff
+# was cut and no changed file is uncovered: a review that did not see everything is
+# never complete, so in loop mode it can never pass. Whether an
 # incomplete or blocking review fails the job is the caller's rule (review-post.sh):
 # always in loop mode, never in owner mode.
 # One group gives the comment the loop has always posted. Several give a part per group
@@ -108,12 +114,18 @@ def review_combine:
       | $c + {ok: (($c.rc // "") == "0" and ($c.result | valid_review))} ] as $g
   | ($g | map(select(.ok))) as $ok
   | ($g | length) as $n
-  | ($n > 0 and ($ok | length) == $n) as $complete
+  | (.uncovered // []) as $uncovered
+  | ($n > 0 and ($ok | length) == $n and ($uncovered | length) == 0 and all($g[]; .truncated != true)) as $complete
   | (if ($ok | length) == 0 then "none" elif any($ok[]; .result.verdict == "block") then "block" else "pass" end) as $verdict
   | (if $verdict == "none" then "NOT COMPLETED"
      else ($verdict | ascii_upcase) + (if $complete then "" else " (INCOMPLETE)" end) end) as $headline
-  | "The diff for this part was cut at the size limit, so the reviewer did not see all of it." as $cutnote
-  | ( [ review_marker($mode) + "\n### Agent review" + (if $mode == "owner" then " (advisory)" else "" end) + ": " + $headline ]
+  | def cutnote($what):
+      "The diff\($what) was cut at the size limit, so the reviewer did not see all of it."
+      + (if ((.cut_files // []) | length) > 0 then
+           " Not fully shown: " + (.cut_files[:50] | map(_code) | join(", "))
+           + (if (.cut_files | length) > 50 then " and \((.cut_files | length) - 50) more" else "" end) + "."
+         else "" end);
+    ( [ review_marker($mode) + "\n### Agent review" + (if $mode == "owner" then " (advisory)" else "" end) + ": " + $headline ]
       + (if $mode == "owner" then
            [ "This review is advisory. It is posted for the owner to read, and the check passes whatever it says."
              + (if (.head // "") != "" then " Reviewed at commit " + (.head | _code) + "." else "" end),
@@ -121,13 +133,18 @@ def review_combine:
               else "No usable linked issue: reviewed on the diff alone." end) ]
            + (if (.protected // "") != "" then [.protected | sub("\\s+\\z"; "")] else [] end)
          else [] end)
+      + (if ($uncovered | length) > 0 then
+           [ "\($uncovered | length) changed file(s) were not reviewed: their names could not be passed to the reviewer as text, so they are in no part's diff. Review them by hand.\n\n"
+             + ($uncovered[:50] | map("- " + _code) | join("\n"))
+             + (if ($uncovered | length) > 50 then "\n- (\(($uncovered | length) - 50) more)" else "" end) ]
+         else [] end)
     ) as $head
   | ( if $n == 0 then
         ["The review could not be completed: no review was produced for this push. The workflow run has the reason."]
       elif $n == 1 then
         ($g[0] | if .ok then
                    [.result.summary | _model]
-                   + (if .truncated then ["The diff was cut at the size limit, so the reviewer did not see all of it."] else [] end)
+                   + (if .truncated then [cutnote("")] else [] end)
                    + (if (.result.findings | length) > 0 then [.result.findings | map(_finding) | join("\n")] else [] end)
                  else ["The review could not be completed: the reviewer \(_why)."] end)
       else
@@ -138,10 +155,10 @@ def review_combine:
               + (if .ok then (.result.verdict | ascii_upcase) else "NOT REVIEWED" end) + "\n\n"
               + "(\(.files) files, \(.lines) changed lines)\n\n"
               + (if .ok then (.result.summary | _model) else "The reviewer \(_why)." end)
-              + (if .truncated then "\n\n" + $cutnote else "" end) ]
+              + (if .truncated then "\n\n" + cutnote(" for this part") else "" end) ]
         + ( [$ok[] | .result.findings[] | _finding] as $f
             | if ($f | length) > 0 then ["#### Findings\n\n" + ($f | join("\n"))] else [] end )
-        + (if $complete then [] else
+        + (if ($ok | length) == $n then [] else
              ["\($n - ($ok | length)) of \($n) parts could not be reviewed: " + ($g | map(select(.ok | not) | .name | _code) | join(", ")) + "."] end)
       end
     ) as $rest

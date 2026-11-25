@@ -463,6 +463,23 @@ check "combine: model text cannot open an HTML comment, so it cannot plant a loo
 check "combine: a backtick in a model-given file name stays inside its code span" "1" "$(jq -r .body <<<"$out" | grep -c "^- \*\*minor\*\* \`a'b.go\` x ")"
 out=$(cmb owner "[[\"all\",\"0\",$r_pass,true]]")
 check "combine: a cut diff is said in the review" "1" "$(jq -r .body <<<"$out" | grep -c 'diff.* was cut at the size limit')"
+check "combine: a review of a cut diff is never complete" 'false' "$(jq -c .complete <<<"$out")"
+out=$(cmb owner "[[\"all\",\"0\",$r_pass,true]]" '{"calls":[{"rc":"0","truncated":true,"cut_files":["big/huge.txt","\"odd/q\\\"uote.go\""],"result":'"$r_pass"'}]}')
+check "combine: the files not fully shown are listed" "1" "$(jq -r .body <<<"$out" | grep -cF 'Not fully shown: `big/huge.txt`, `"odd/q\"uote.go"`')"
+out=$(cmb owner "[[\"all\",\"0\",$r_pass]]" '{"uncovered":["\"odd/bad\\377name.go\"","x`y"]}')
+check "combine: files that were in no prompt are listed as not reviewed, and the review is incomplete" '["pass",false]|1|1|1' \
+  "$(jq -c '[.verdict, .complete]' <<<"$out")|$(jq -r .body <<<"$out" | grep -c '^2 changed file(s) were not reviewed')|$(jq -r .body <<<"$out" | grep -cF -- '- `"odd/bad\377name.go"`')|$(jq -r .body <<<"$out" | grep -cF -- "- \`x'y\`")"
+check "combine: loop, uncovered files -> never complete" 'false' "$(cmb loop "[[\"all\",\"0\",$r_pass]]" '{"uncovered":["a"]}' | jq -c .complete)"
+rf() { jq -c -L "$root/lib" --argjson s "$2" --argjson cap "$3" --argjson mc "$4" 'include "split"; refine_plan($s; $cap; $mc) | '"${5:-.}" <<<"$1"; }
+rf_plan='{"split":true,"capped":false,"uncapped":2,"total_files":4,"total_lines":40,"groups":[{"name":"a/","paths":["a/1","a/2","a/3"],"plines":[10,10,10],"files":3,"lines":30},{"name":"b/","paths":["b/1"],"plines":[10],"files":1,"lines":10}]}'
+check "refine: a group over the byte cap is cut into runs of files that fit" '[["a/ (part 1/2)",["a/1","a/2"],20],["a/ (part 2/2)",["a/3"],10],["b/",["b/1"],10]]' \
+  "$(rf "$rf_plan" '{"0":[100,100,100]}' 250 8 '[.groups[] | [.name, .paths, .lines]]')"
+check "refine: a single file over the cap cannot be split and stays" '["a/","b/"]' "$(rf "$rf_plan" '{"1":[9999]}' 250 8 '[.groups[].name]')"
+check "refine: never more groups than the call cap: the last part takes the rest" '[["a/ (part 1/2)",1],["a/ (part 2/2)",2],["b/",1]]' \
+  "$(rf "$rf_plan" '{"0":[200,200,200]}' 250 3 '[.groups[] | [.name, .files]]')"
+check "refine: no room under the call cap -> unchanged" '["a/","b/"]' "$(rf "$rf_plan" '{"0":[200,200,200]}' 250 2 '[.groups[].name]')"
+check "refine: one group becoming several makes the plan split; every file still once" '[true,["a/1","a/2","a/3","b/1"]]' \
+  "$(rf "$rf_plan" '{"0":[200,200,200]}' 250 8 '[.split, [.groups[].paths[]]]')"
 out=$(cmb loop "[[\"a/\",\"0\",$r_pass],[\"b/\",\"0\",$r_p2]]" '{"plan":{"split":true,"capped":true,"uncapped":11,"total_files":900,"total_lines":20000,"groups":[{"name":"a/","files":500,"lines":9000},{"name":"b/","files":400,"lines":11000}]}}')
 check "combine: groups merged to stay under the call cap are said in the review" "1" "$(jq -r .body <<<"$out" | grep -c '11 parts.*merged')"
 out=$(cmb owner "[[\"all\",\"0\",$(jq -nc '{verdict: "pass", summary: ("long " * 15000), findings: []}')]]" '{"protected":"#### Protected paths\n\n- `KEEP/me.go` (protected by `KEEP`)"}')
@@ -635,9 +652,23 @@ RQ_BASE='HEAD; touch pwned' rqp owner; rc=$?
 check "review-prompts: a base that is not a commit id is refused" "1|no" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)|$([[ -e "$rq/repo/pwned" ]] && echo yes || echo no)"
 SPLIT_MAX_FILES=abc SPLIT_MAX_LINES='' SPLIT_MAX_CALLS='1; touch pwned' SPLIT_MAX_DIFF_BYTES=-4 rqp owner; rc=$?
 check "review-prompts: thresholds that are not numbers fall back to the defaults" "0|false|no" "$rc|$(jq -r .split "$rq/w/plan.json")|$([[ -e "$rq/repo/pwned" ]] && echo yes || echo no)"
-SPLIT_MAX_DIFF_BYTES=200 rqp owner
-check "review-prompts: a diff over the byte cap is cut, marked and said in the prompt" "yes|1|true" \
-  "$([[ -e "$rq/w/groups/0/truncated" ]] && echo yes || echo no)|$(grep -c '^(diff truncated' "$p0")|$(sed -n '/^```diff$/,/^```$/p' "$p0" | wc -c | awk '{print ($1 <= 220) ? "true" : "false"}')"
+SPLIT_MAX_DIFF_BYTES=250 rqp owner; rc=$?
+check "review-prompts: a group over the byte cap is first split per file, so nothing is cut" "0|true|0|3" \
+  "$rc|$(jq -r '.split and (.groups | length) > 1' "$rq/w/plan.json")|$(find "$rq/w/groups" -name truncated | wc -l | tr -d ' ')|$(cat "$rq/w"/groups/*/prompt.md | grep -c '^diff --git ')"
+SPLIT_MAX_DIFF_BYTES=250 rqp loop 36; rc=$?
+check "review-prompts: ... in loop mode too: split, complete, exit 0" "0|3|0" "$rc|$(cat "$rq/w"/groups/*/prompt.md | grep -c '^diff --git ')|$(grep -c 'diff truncated' "$rq/w"/groups/*/prompt.md | grep -vc ':0$')"
+SPLIT_MAX_DIFF_BYTES=60 rqp owner; rc=$?
+check "review-prompts: owner, one file's diff over the cap -> cut, said in the prompt, the file is named" "0|3|3|cmd/main.go|true" \
+  "$rc|$(find "$rq/w/groups" -name truncated | wc -l | tr -d ' ')|$(grep -l '^(diff truncated' "$rq/w"/groups/*/prompt.md | wc -l | tr -d ' ')|$(cat "$rq/w/groups/$(jq -r '[.groups[].paths[0]] | index("cmd/main.go")' "$rq/w/plan.json")/truncated")|$(sed -n '/^```diff$/,/^```$/p' "$p0" | wc -c | awk '{print ($1 <= 80) ? "true" : "false"}')"
+SPLIT_MAX_DIFF_BYTES=60 rqp loop 36; rc=$?
+check "review-prompts: loop, one file's diff over the cap -> the check fails: never a pass on a cut diff" "1|1|no" \
+  "$([[ $rc -ne 0 ]] && echo 1 || echo 0)|$(grep -c '^::error::.*too large to review completely' "$rq/stdout")|$([[ -e "$rq/w/plan.json" ]] && echo yes || echo no)"
+SPLIT_MAX_DIFF_BYTES=250 SPLIT_MAX_CALLS=1 rqp loop 36; rc=$?
+check "review-prompts: loop, the call cap leaves no room to split further -> fails rather than cut" "1|1" \
+  "$([[ $rc -ne 0 ]] && echo 1 || echo 0)|$(grep -c '^::error::.*too large to review completely' "$rq/stdout")"
+SPLIT_MAX_DIFF_BYTES=250 SPLIT_MAX_CALLS=1 rqp owner; rc=$?
+check "review-prompts: owner, same -> one cut prompt, the files not fully shown are listed" "0|1|true" \
+  "$rc|$(find "$rq/w/groups" -name prompt.md | wc -l | tr -d ' ')|$([[ $(wc -l < "$rq/w/groups/0/truncated") -ge 1 ]] && echo true || echo false)"
 rqp owner
 check "review-prompts: under the cap nothing is marked" "no|0" "$([[ -e "$rq/w/groups/0/truncated" ]] && echo yes || echo no)|$(grep -c 'diff truncated' "$p0")"
 
@@ -708,6 +739,27 @@ rqc owner; rc=$?
 check "review-calls: no plan (the prompt step failed) -> owner exits 0 with a warning, nothing is called" "0|0|1" "$rc|$(wc -l < "$rq/claude.log" | tr -d ' ')|$(grep -c '^::warning::' "$rq/stdout")"
 rqc loop; rc=$?
 check "review-calls: no plan -> loop fails" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+
+# Coverage: the files in the prompts must be the files git says changed. A name that is
+# not valid UTF-8 does not survive the plan (jq text), so it would be in no part's diff.
+( cd "$rq/repo" && printf 'x\n' > "$(printf 'odd/bad\377name.go')" && git add -A && git commit -qm bytes )
+rq_all=$(git -C "$rq/repo" diff --name-only --no-renames -z "$rq_base"...HEAD | tr -cd '\0' | wc -c | tr -d ' ')
+rqp owner; rc=$?
+check "coverage: not split -> the whole diff is in the one prompt, nothing uncovered" "0|$rq_all|[]" \
+  "$rc|$(grep -c '^diff --git ' "$p0")|$(jq -c . "$rq/w/uncovered.json")"
+SPLIT_MAX_FILES=3 rqp owner; rc=$?
+check "coverage: owner, split, a non-UTF-8 name is in no part -> exit 0, recorded as not reviewed (quoted, no raw byte)" '0|["\"odd/bad\\377name.go\""]|0' \
+  "$rc|$(jq -c . "$rq/w/uncovered.json")|$(LC_ALL=C grep -c $'\377' "$rq/stdout")"
+check "coverage: ... every other file is still in exactly one part, the newline name included" "$((rq_all - 1))|1" \
+  "$(cat "$rq/w"/groups/*/prompt.md | grep -c '^diff --git ')|$(cat "$rq/w"/groups/*/prompt.md | grep -c '^diff --git "a/odd/new\\nline.go"')"
+rqc owner
+: > "$rq/log"
+( PATH="$rq/bin:$PATH" GHLOG="$rq/log" GITHUB_REPOSITORY=o/r MODE=owner bash "$root/scripts/review-post.sh" "$rq/w" 9 > "$rq/stdout" 2>&1 ); rc=$?
+check "coverage: owner comment lists the file as not reviewed and the review as incomplete" "0|1|1|1" \
+  "$rc|$(sed -n 2p "$rq/log.body" | grep -c '(INCOMPLETE)$')|$(grep -c '^1 changed file(s) were not reviewed' "$rq/log.body")|$(grep -cF -- '- `"odd/bad\377name.go"`' "$rq/log.body")"
+SPLIT_MAX_FILES=3 rqp loop 36; rc=$?
+check "coverage: loop, a file in no part's diff -> the check fails, with a count and no raw bytes" "1|1|0|no" \
+  "$([[ $rc -ne 0 ]] && echo 1 || echo 0)|$(grep -c '^::error::1 changed file(s) ' "$rq/stdout")|$(LC_ALL=C grep -c $'\377' "$rq/stdout")|$([[ -e "$rq/w/plan.json" ]] && echo yes || echo no)"
 rm -rf "$rq"
 
 # ---------- apply-backlog.sh (stubbed gh, dry run) ----------

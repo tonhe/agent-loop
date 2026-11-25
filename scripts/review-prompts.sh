@@ -12,9 +12,26 @@
 #   owner  header prompts/review-owner.md, the linked issues review-linked.sh accepted
 #          (or a line saying there is none), the owner-mode protected section
 #
+# Nothing may go unreviewed silently. Two checks, both fail closed in loop mode:
+#
+#   Size.  A group whose diff is over SPLIT_MAX_DIFF_BYTES is first cut into smaller
+#          groups file by file (lib/split.jq, refine_plan), so nothing is dropped when
+#          that can be avoided. Only a single file whose own diff is over the cap, or a
+#          group left over when the call cap is used up, still does not fit.
+#            loop   exit 1: the PR is too large to review completely. A cut diff never
+#                   leads to a passing check.
+#            owner  the diff is cut, the prompt says "diff truncated", and the files not
+#                   fully shown are written to groups/N/truncated for the posted review.
+#   Coverage. The plan is made from text (numstat through jq), and a file name that is
+#          not valid UTF-8 does not survive that. So after the prompts are built, the
+#          files that are in some group's diff are compared, NUL-separated and byte for
+#          byte, with the files git says changed. A file in no diff:
+#            loop   exit 1, with the number of such files.
+#            owner  listed in WORK_DIR/uncovered.json for the posted review ("not reviewed").
+#
 # File names come from the PR. They travel from the plan to git base64-encoded, become
 # pathspecs only after "--" and with the literal magic (no globbing, no option, no
-# evaluation), and are otherwise only printed.
+# evaluation), and are otherwise only printed, in git's quoted form.
 #
 # Usage: review-prompts.sh WORK_DIR                 (run in the PR checkout)
 # Env:   MODE (loop|owner), ISSUE (loop mode), BASE_SHA, VERIFY_COMMAND, PLATFORMS,
@@ -23,9 +40,10 @@
 #        SPLIT_MAX_DIFF_BYTES (300000): anything that is not a positive whole number
 #        counts as the default
 # Reads  WORK_DIR/linked/issues.md, WORK_DIR/protected/{section.md,owner-section.md}
-# Writes WORK_DIR/plan.json, WORK_DIR/groups/N/prompt.md, WORK_DIR/groups/N/truncated
-#        (only when that group's diff was cut at SPLIT_MAX_DIFF_BYTES)
+# Writes WORK_DIR/plan.json, WORK_DIR/groups/N/prompt.md, WORK_DIR/uncovered.json,
+#        WORK_DIR/groups/N/truncated (owner mode, only when that group's diff was cut)
 set -euo pipefail
+export LC_ALL=C
 here=$(cd "$(dirname "$0")/.." && pwd)
 work=$1
 mode=${MODE:-loop}
@@ -42,9 +60,10 @@ max_files=$(num "${SPLIT_MAX_FILES:-}" 40)
 max_lines=$(num "${SPLIT_MAX_LINES:-}" 3000)
 max_calls=$(num "${SPLIT_MAX_CALLS:-}" 8)
 max_bytes=$(num "${SPLIT_MAX_DIFF_BYTES:-}" 300000)
+range="$BASE_SHA...HEAD"
 
 mkdir -p "$work"
-rm -rf "$work/groups" "$work/plan.json"
+rm -rf "$work/groups" "$work/plan.json" "$work/uncovered.json"
 
 # Shared parts first: if the issue is refused (loop mode) nothing else is written.
 if [[ "$mode" == owner ]]; then tmpl="$here/prompts/review-owner.md"; else tmpl="$here/prompts/review.md"; fi
@@ -58,35 +77,81 @@ else
   section="$work/protected/owner-section.md"
 fi
 
+# What git says changed: the reference for the coverage check. NUL-separated raw bytes.
+git diff --name-only -z --no-renames "$range" | sort -z -u > "$work/all.z"
+
 # --no-renames: one path per line, so a rename counts as a deletion plus an addition.
-git -c core.quotePath=false diff --numstat --no-renames "$BASE_SHA"...HEAD > "$work/numstat.txt"
+git -c core.quotePath=false diff --numstat --no-renames "$range" > "$work/numstat.txt"
 jq -Rs -L "$here/lib" --argjson f "$max_files" --argjson l "$max_lines" --argjson c "$max_calls" \
   'include "split"; parse_numstat | split_plan($f; $l; $c)' "$work/numstat.txt" > "$work/plan.tmp"
+
+paths=()
+load_paths() {  # group index -> paths[]: that group's files as literal pathspecs
+  paths=()
+  local b64 p
+  while IFS= read -r b64; do
+    p=$(printf '%s' "$b64" | base64 -d; printf x)   # the x keeps a trailing newline in a name
+    paths+=(":(top,literal)${p%x}")
+  done < <(jq -r --argjson i "$1" '.groups[$i].paths[] | @base64' "$work/plan.tmp")
+}
+gdiff() {  # git diff options... : diff of range limited to paths[], 100 pathspecs at a time
+  local k
+  for ((k = 0; k < ${#paths[@]}; k += 100)); do
+    git "$@" "$range" -- "${paths[@]:k:100}"
+  done
+}
+
+# Size, first pass: measure. A group over the byte cap with more than one file gets its
+# files measured one by one, and refine_plan cuts it into groups that fit.
+sizes='{}'
+n=$(jq '.groups | length' "$work/plan.tmp")
+for ((i = 0; i < n; i++)); do
+  (( $(jq --argjson i "$i" '.groups[$i].files' "$work/plan.tmp") > 1 )) || continue
+  load_paths "$i"
+  (( $(gdiff diff | wc -c) > max_bytes )) || continue
+  per='[]'
+  for p in "${paths[@]}"; do
+    per=$(jq -c --argjson b "$(git diff "$range" -- "$p" | wc -c)" '. + [$b]' <<<"$per")
+  done
+  sizes=$(jq -c --arg i "$i" --argjson per "$per" '. + {($i): $per}' <<<"$sizes")
+done
+if [[ "$sizes" != '{}' ]]; then
+  jq -L "$here/lib" --argjson s "$sizes" --argjson cap "$max_bytes" --argjson c "$max_calls" \
+    'include "split"; refine_plan($s; $cap; $c)' "$work/plan.tmp" > "$work/plan.tmp2"
+  mv "$work/plan.tmp2" "$work/plan.tmp"
+fi
+
 n=$(jq '.groups | length' "$work/plan.tmp")
 split=$(jq -r .split "$work/plan.tmp")
 echo "Review plan: $(jq -r '"\(.total_files) file(s), \(.total_lines) changed line(s)"' "$work/plan.tmp"); $n call(s)$([[ $(jq -r .capped "$work/plan.tmp") == true ]] && echo ", groups merged to stay within $max_calls calls")."
 
+: > "$work/covered.z"
+too_big=0
 for ((i = 0; i < n; i++)); do
   d="$work/groups/$i"; mkdir -p "$d"
   if [[ "$split" == true ]]; then
-    paths=()
-    while IFS= read -r b64; do
-      p=$(printf '%s' "$b64" | base64 -d; printf x)   # the x keeps a trailing newline in a name
-      paths+=(":(top,literal)${p%x}")
-    done < <(jq -r --argjson i "$i" '.groups[$i].paths[] | @base64' "$work/plan.tmp")
-    : > "$d/diff.txt"
-    for ((k = 0; k < ${#paths[@]}; k += 100)); do
-      git diff "$BASE_SHA"...HEAD -- "${paths[@]:k:100}" >> "$d/diff.txt"
-    done
+    load_paths "$i"
+    gdiff diff > "$d/diff.txt"
+    gdiff diff --name-only -z --no-renames >> "$work/covered.z"
+    gdiff -c core.quotePath=true diff --name-only > "$d/names.txt"
   else
-    git diff "$BASE_SHA"...HEAD > "$d/diff.txt"
+    git diff "$range" > "$d/diff.txt"
+    cat "$work/all.z" >> "$work/covered.z"
+    git -c core.quotePath=true diff --name-only "$range" > "$d/names.txt"
   fi
   cut=false
   if (( $(wc -c < "$d/diff.txt") > max_bytes )); then
+    too_big=$((too_big + 1))
     # Cut at the limit, then drop the last, probably partial, line.
     head -c "$max_bytes" "$d/diff.txt" | sed '$d' > "$d/diff.cut"
     mv "$d/diff.cut" "$d/diff.txt"
-    cut=true; : > "$d/truncated"
+    cut=true
+    # Files not fully shown: git prints files in the order of names.txt; the cut diff
+    # holds k "diff --git" headers, so the k-th file is partial and the later ones are
+    # missing. Names are in git's quoted form (printable ASCII).
+    k=$(grep -c '^diff --git ' "$d/diff.txt" || true)
+    (( k >= 1 )) || k=1
+    tail -n "+$k" "$d/names.txt" > "$d/truncated"
   fi
   {
     cat "$work/header.md"; echo
@@ -101,8 +166,35 @@ for ((i = 0; i < n; i++)); do
       echo "(diff truncated: the diff above was cut at $max_bytes bytes, so part of it is not shown. Say in your summary that you did not see the whole diff, and use Read and \`git diff\` for the files you need.)"
     fi
   } > "$d/prompt.md"
-  rm -f "$d/diff.txt"
+  rm -f "$d/diff.txt" "$d/names.txt"
   echo "Part $((i + 1)) of $n: $(jq -r --argjson i "$i" '.groups[$i] | "\(.files) file(s), \(.lines) changed line(s)"' "$work/plan.tmp")$([[ "$cut" == true ]] && echo ", diff truncated")."
 done
+
+if (( too_big > 0 )); then
+  if [[ "$mode" == loop ]]; then
+    echo "::error::This PR is too large to review completely: $too_big part(s) have a diff over $max_bytes bytes even after splitting file by file. A loop PR is never passed on a cut diff. Review it by hand, or make the change smaller."
+    exit 1
+  fi
+  echo "::warning::$too_big part(s) have a diff over $max_bytes bytes even after splitting file by file. The diff was cut; the review says which files were not fully shown."
+fi
+
+# Coverage: every changed file must be in some group's diff. Compared as raw,
+# NUL-separated names; shown only in git's quoted form.
+sort -z -u "$work/covered.z" > "$work/covered.sorted.z"
+comm -z -23 "$work/all.z" "$work/covered.sorted.z" > "$work/uncovered.z"
+missing=$(tr -cd '\0' < "$work/uncovered.z" | wc -c)
+echo '[]' > "$work/uncovered.json"
+if (( missing > 0 )); then
+  if [[ "$mode" == loop ]]; then
+    echo "::error::$missing changed file(s) are in no part's diff (file names that do not survive as text, for example names that are not valid UTF-8). A loop PR is never passed with unreviewed files. Review it by hand."
+    exit 1
+  fi
+  paths=()
+  while IFS= read -r -d '' p; do paths+=(":(top,literal)$p"); done < "$work/uncovered.z"
+  gdiff -c core.quotePath=true diff --name-only --no-renames | jq -R . | jq -s . > "$work/uncovered.json"
+  echo "::warning::$missing changed file(s) are in no part's diff and were not reviewed. The review lists them."
+fi
+rm -f "$work/all.z" "$work/covered.z" "$work/covered.sorted.z" "$work/uncovered.z"
+
 # Last, so that a plan is only ever there together with all of its prompts.
 mv "$work/plan.tmp" "$work/plan.json"
