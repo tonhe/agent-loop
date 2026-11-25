@@ -24,7 +24,8 @@ Check first: `bash $S/loop-config.sh` works (the repo has agent-loop callers), a
 3. **Check each report.** Save it to a file and run `bash $S/check-report.sh FILE`. If it is rejected (an unfiled "noted" item, a bare `#N`, a missing PR URL), send the problems back to the same subagent once to fix the report. Still rejected: record the issue as "report rejected" and leave its PR for the owner.
 4. **Review.** For `pr_opened`: run the `review-pr` skill on the PR. CHANGES NEEDED: at most one fix round by the same subagent, then review again. Still not clean: leave the PR for the owner.
 5. **Gate.** Run the `merge-gate` skill: `bash $S/merge-gate.sh PR`. A refusal for pending checks means come back later; go on dispatching other work and re-run the gate on the next pass of the loop. Any other refusal: leave the PR for the owner and record the reasons.
-   - A PR with `live_check` in its report carries `agent:live-check`. Do not pause. Record it for the final report with the exact commands from the report, and go on. The gate refuses it until the owner comments `Live check passed <sha>`.
+   - `needs owner merge`: the PR needs the owner's approval (not risk:low, a protected or protected-review path, or `agent:live-check`). The gate merges none of these for now (https://github.com/tonhe/agent-loop/issues/35). Record it for the final report and go on.
+   - A PR with `live_check` in its report carries `agent:live-check`. Do not pause. Record it for the final report with the exact commands from the report, and go on.
 6. **Progress.** When a PR is actually merged (`gh pr view PR --json state` says `MERGED`), run `bash $S/sprint-progress.sh "merged <PR URL> (<issue URL>): <title>. <k>/<budget> PRs, <open> left in <milestone>."`. It posts to Discord and keeps one progress comment on the Release issue up to date.
 7. **Stopped issues.** A subagent that stopped has already handed its issue back (`needs:human` plus a comment saying what is needed). Record it and go on. Never answer for the owner.
 8. **Process problems** (a script fails, a rule is wrong, a label is missing): use the `process-fix` skill, then go on.
@@ -35,8 +36,9 @@ Check first: `bash $S/loop-config.sh` works (the repo has agent-loop callers), a
 Stop when the finish line is met, the budget is spent (merged PRs or hours), or nothing is selectable and nothing is waiting on checks. Let in-flight subagents finish their PRs, but start nothing new once the budget is spent. Then post one last `sprint-progress.sh` line and give the owner the final report, every item a full URL:
 
 - **Merged:** each PR and its issue.
-- **Left open:** each PR with the gate's reasons (pending, failed check, protected path, ...).
-- **Waiting on your live check:** each PR, its head commit (first 7 characters), and the exact commands to run. Then comment `Live check passed <sha>` (or `failed`) on the PR and run the gate again.
+- **Needs owner merge:** each PR the gate refused as `needs owner merge`, with its reasons. The owner reviews and merges these by hand.
+- **Left open:** each other PR with the gate's reasons (pending, failed check, conflict, ...).
+- **Waiting on your live check:** each PR, its head commit (first 7 characters), and the exact commands to run. After a passed check, the owner merges it by hand (it is also under "Needs owner merge").
 - **Stopped for a decision:** each issue and what it needs.
 - **Process issues filed:** each agent-loop issue URL.
 - **Not started:** what `sprint-next` skipped and why, if it matters.

@@ -51,15 +51,34 @@ for p in CLAUDE.md sub/dir/CLAUDE.md RELEASING.md .claude/settings.json .claude-
 done
 check "gate: docs/RELEASING.md and a file called CLAUDE.mdx are not process" "true" "$(mgc '.files += ["docs/RELEASING.md", "CLAUDE.mdx", "notes/claude.md"]')"
 check "gate: the old side of a rename counts (moving out of .github/)" "false" "$(mgc '.files += [".github/x.sh", "scripts/x.sh"]')"
-check "gate: protected_review_paths without an Owner decision refuses" \
+# Owner approvals (Owner decision, live-check answer) as they will work once agents have
+# their own identity (tonhe/agent-loop#35); until then merge-gate.sh never sets this.
+tr='.owner_approvals_trusted = true'
+check "gate (approvals trusted): protected_review_paths without an Owner decision refuses" \
   '"internal/sysprobe/a.go" (protected_review_paths internal/sysprobe/**) and issue #36 has no Owner decision comment' \
-  "$(mgr '.files += ["internal/sysprobe/a.go"]' | grep -o '"internal/sysprobe/a.go".*')"
-check "gate: protected_review_paths with an Owner decision passes (scope is agent-review's)" "true" \
-  "$(mgc '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "tonhe"}, body: "Owner decision: sysprobe may change."}]')"
-check "gate: an Owner decision by someone else does not count" "false" \
-  "$(mgc '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "mallory"}, body: "Owner decision: anything."}]')"
-check "gate: an Owner decision carrying a loop marker does not count" "false" \
-  "$(mgc '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "tonhe"}, body: "Owner decision: x\n<!-- agent-dev -->"}]')"
+  "$(mgr "$tr | .files += [\"internal/sysprobe/a.go\"]" | grep -o '"internal/sysprobe/a.go".*')"
+check "gate (approvals trusted): protected_review_paths with an Owner decision passes" "true" \
+  "$(mgc "$tr | .files += [\"internal/sysprobe/a.go\"] | .issue.comments = [{author: {login: \"tonhe\"}, body: \"Owner decision: sysprobe may change.\"}]")"
+check "gate (approvals trusted): an Owner decision by someone else does not count" "false" \
+  "$(mgc "$tr | .files += [\"internal/sysprobe/a.go\"] | .issue.comments = [{author: {login: \"mallory\"}, body: \"Owner decision: anything.\"}]")"
+check "gate (approvals trusted): an Owner decision carrying a loop marker does not count" "false" \
+  "$(mgc "$tr | .files += [\"internal/sysprobe/a.go\"] | .issue.comments = [{author: {login: \"tonhe\"}, body: \"Owner decision: x\n<!-- agent-dev -->\"}]")"
+
+# Interim (until tonhe/agent-loop#35): no owner approval is trusted, so the gate merges
+# only PRs that need none, and refuses every other one with "needs owner merge".
+check "gate: the default does not trust owner approvals" "false" "$(jq -r '.owner_approvals_trusted // false' <<<"$mg_ok")"
+check "gate: protected_review_paths WITH an Owner decision refuses: needs owner merge" "false|1" \
+  "$(mgc '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "tonhe"}, body: "Owner decision: sysprobe may change."}]')|$(mgr '.files += ["internal/sysprobe/a.go"] | .issue.comments = [{author: {login: "tonhe"}, body: "Owner decision: sysprobe may change."}]' | grep -c '^needs owner merge: changes "internal/sysprobe/a.go"')"
+check "gate: protected_review_paths without a decision refuses: needs owner merge" "1" \
+  "$(mgr '.files += ["internal/sysprobe/a.go"]' | grep -c 'needs owner merge: changes "internal/sysprobe/a.go"')"
+check "gate: agent:live-check WITH the owner's passed answer refuses: needs owner merge" "false|1" \
+  "$(mgc ".pr.labels = [{name: \"agent:live-check\"}] | .pr.comments = [{author: {login: \"tonhe\"}, body: \"Live check passed $sha\"}]")|$(mgr ".pr.labels = [{name: \"agent:live-check\"}] | .pr.comments = [{author: {login: \"tonhe\"}, body: \"Live check passed $sha\"}]" | grep -c '^needs owner merge: labeled agent:live-check')"
+check "gate: a risk:medium issue refuses: needs owner merge" \
+  "needs owner merge: issue #36 is not risk:low (risk:medium); only risk:low PRs are merged by the gate until https://github.com/tonhe/agent-loop/issues/35 is done" \
+  "$(mgr '.issue.labels = [{name: "risk:medium"}]')"
+check "gate: an issue with no risk label refuses: needs owner merge" "1" "$(mgr '.issue.labels = []' | grep -c '^needs owner merge: issue #36 is not risk:low (no risk label)')"
+check "gate: a protected_paths hit says needs owner merge" "1" "$(mgr '.protected_hits = ["Makefile"]' | grep -c '^needs owner merge: changes protected path "Makefile"')"
+check "gate: risk:low, no protected file, no live check still passes" "true|" "$(mg .)"
 check "gate: no protected_review_paths configured -> nothing to decide" "true" "$(mgc '.files += ["internal/sysprobe/a.go"] | .protected_review_paths = ""')"
 
 check "gate: issue labeled needs:human refuses" "issue #36 is labeled needs:human" "$(mgr '.issue.labels += [{name: "needs:human"}]')"
@@ -88,7 +107,7 @@ check "gate: up to date under a strict ruleset passes" "true" "$(mgc '.rules[0].
 check "gate: every reason is listed at once" "3" "$(mg '.pr.isDraft = true | .issue.labels += [{name: "needs:human"}] | .checks[0].conclusion = "failure"' | cut -d'|' -f2 | tr ';' '\n' | wc -l)"
 
 # live check: agent:live-check waits for the owner's "Live check passed <sha>"
-lc='.pr.labels = [{name: "agent:live-check"}]'
+lc='.owner_approvals_trusted = true | .pr.labels = [{name: "agent:live-check"}]'
 check "gate: agent:live-check without an answer refuses" \
   'labeled agent:live-check and the owner has not posted "Live check passed" for head 0123456' "$(mgr "$lc")"
 check "gate: Live check passed naming the head passes" "true" \
@@ -124,9 +143,10 @@ case "$args" in
   "issue view"*)     cat "$MG/issue.json" ;;
   *"contents/.github/workflows/agent-dev.yml?ref="*)    echo "${args#*ref=}" | cut -d' ' -f1 >> "$MG/refs"; jq -n --rawfile y "$MG/dev.yml" '{content: ($y | @base64)}' | jq -r .content ;;
   *"contents/.github/workflows/agent-review.yml?ref="*) jq -n --rawfile y "$MG/review.yml" '{content: ($y | @base64)}' | jq -r .content ;;
-  "api repos/o/r/pulls/50 --jq .changed_files") cat "$MG/changed" ;;
+  "api repos/"*"/pulls/50 --jq .changed_files") cat "$MG/changed" ;;
   *"pulls/50/files"*"--jq [.[]"*) jq -c '[.[] | .filename, (.previous_filename // empty)]' "$MG/files.json" ;;
   *"pulls/50/files"*"--jq length"*) jq 'length' "$MG/files.json" ;;
+  *"pulls/50/files"*"--jq .[].filename"*) jq -r '.[].filename' "$MG/files.json" ;;  # as real gh prints it
   *"rules/branches/"*) cat "$MG/rules.json" ;;
   *"/check-runs"*)   jq -c '[.check_runs[] | {id, name, status, conclusion}]' "$MG/checks.json" ;;
   *"/statuses"*)     echo '[]' ;;
@@ -205,6 +225,48 @@ cp "$mgs/dev.orig" "$mgs/dev.yml"
 check "gate.sh: a bad PR number is a usage error" "2" "$(mgrun 'x;y' >/dev/null; echo $?)"
 check "gate.sh: LOOP_REPO, DEV_CALLER and REVIEW_CALLER from the environment are ignored" "0|0" \
   "$(: > "$mgs/log"; PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r LOOP_REPO=x/y DEV_CALLER=lax.yml REVIEW_CALLER=lax.yml bash "$root/scripts/merge-gate.sh" 50 --check >/dev/null 2>&1; echo $?)|$(grep -c 'lax.yml' "$mgs/log")"
+# LOOP_REPO cannot switch off "not agent-loop itself" (fix 3 of the security review)
+check "gate.sh: LOOP_REPO from the environment cannot make agent-loop gateable" "1|1" \
+  "$(: > "$mgs/log"; o=$(PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=tonhe/agent-loop LOOP_REPO=x/y bash "$root/scripts/merge-gate.sh" 50 --check 2>&1); echo "$?|$(grep -c 'agent-loop itself' <<<"$o")")"
+
+# Config comes from the PR's base ref through the API, never from the working tree.
+wt=$(mktemp -d); git -C "$wt" init -q; mkdir -p "$wt/.github/workflows"
+printf 'jobs:\n  dev:\n    uses: tonhe/agent-loop/.github/workflows/dev.yml@v1\n    with:\n      owner_login: tonhe\n      protected_paths: ""\n' > "$wt/.github/workflows/agent-dev.yml"
+printf 'jobs:\n  review:\n    uses: tonhe/agent-loop/.github/workflows/review.yml@v1\n    with:\n      owner_login: tonhe\n' > "$wt/.github/workflows/agent-review.yml"
+jq '.[0].filename = "scripts/release.sh"' "$mgs/files.bak" > "$mgs/files.json"
+out=$(cd "$wt" && : > "$mgs/log" && : > "$mgs/refs" && PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r bash "$root/scripts/merge-gate.sh" 50 2>&1); rc=$?
+check "gate.sh: a laxer caller in the working tree is ignored (settings come from the API)" "1|1|0" \
+  "$rc|$(grep -c 'changes protected path "scripts/release.sh"' <<<"$out")|$(grep -c 'pr merge' "$mgs/log")"
+check "loop-config.sh: reads the callers through the contents API at the given ref" "2|release/2" \
+  "$(cd "$wt" && : > "$mgs/log" && PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r bash "$root/scripts/loop-config.sh" release/2 | jq -r '.protected_paths' | grep -c .)|$(grep -o 'agent-review.yml?ref=[^ ]*' "$mgs/log" | cut -d= -f2)"
+cp "$mgs/files.bak" "$mgs/files.json"
+jq '.baseRefName = "develop"' "$mgs/pr.json" > "$mgs/p2" && cp "$mgs/pr.json" "$mgs/pr.bak" && mv "$mgs/p2" "$mgs/pr.json"
+mgrun 50 --check >/dev/null
+check "gate.sh: the settings are read at the PR's base ref, whatever it is" "develop" "$(cat "$mgs/refs")"
+cp "$mgs/pr.bak" "$mgs/pr.json"
+rm -rf "$wt"
+
+# enable-automerge.sh refuses a HEAD_SHA that is not a commit id (fix 1)
+check "enable-automerge.sh: a malformed HEAD_SHA refuses and never merges" "1|0" \
+  "$(: > "$mgs/log"; PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r HEAD_SHA='abc;x' bash "$root/scripts/enable-automerge.sh" 50 >/dev/null 2>&1; echo $?)|$(grep -c 'pr merge' "$mgs/log")"
+
+# loop-config.sh reads only the job that calls agent-loop, never another job's with: (fix 3)
+{ printf 'jobs:\n  lint:\n    uses: someone/lint/.github/workflows/lint.yml@v1\n    with:\n      owner_login: tonhe\n      protected_paths: ""\n'; sed -n '/^  dev:/,$p' "$mgs/dev.orig"; } > "$mgs/dev.yml"
+check "loop-config.sh: another job's with: block in the dev caller is not read" "2" \
+  "$(PATH="$mgs/bin:$PATH" MG="$mgs" GITHUB_REPOSITORY=o/r bash "$root/scripts/loop-config.sh" main | jq -r .protected_paths | grep -c .)"
+cp "$mgs/dev.orig" "$mgs/dev.yml"
+
+# Interim owner-merge rule end to end: refused, "needs owner merge", nothing enabled.
+jq '.labels = [{name: "risk:medium"}]' "$mgs/issue.bak" > "$mgs/issue.json"
+out=$(mgrun 50); rc=$?
+check "gate.sh: a risk:medium PR is refused as needs owner merge and never merged" "1|1|0" \
+  "$rc|$(grep -c '^needs owner merge: the owner reviews and merges this PR by hand' <<<"$out")|$(grep -c 'pr merge' "$mgs/log")"
+cp "$mgs/issue.bak" "$mgs/issue.json"
+jq --arg sha "$sha" '.labels = [{name: "agent:live-check"}] | .comments = [{author: {login: "tonhe"}, body: ("Live check passed " + $sha)}]' "$mgs/pr.bak" > "$mgs/pr.json"
+out=$(mgrun 50); rc=$?
+check "gate.sh: a live-check PR with a passed answer is refused as needs owner merge" "1|1|0" \
+  "$rc|$(grep -c 'needs owner merge: labeled agent:live-check' <<<"$out")|$(grep -c 'pr merge' "$mgs/log")"
+cp "$mgs/pr.bak" "$mgs/pr.json"
 rm -rf "$mgs"
 
 # ---------- a shared gh stub for the sprint scripts ----------

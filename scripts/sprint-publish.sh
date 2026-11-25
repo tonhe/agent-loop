@@ -57,6 +57,6 @@ if jq -e '.live_check.commands? // "" | length > 0' "$result" >/dev/null; then
   gh label create agent:live-check -R "$repo" --color fbca04 \
     --description "Waits for the owner's live check before the merge gate allows it" >/dev/null 2>&1 || true
   gh pr edit "$pr" -R "$repo" --add-label agent:live-check >/dev/null
-  gh pr comment "$pr" -R "$repo" --body "$(jq -r -L "$here/lib" 'include "meta"; "<!-- agent-sprint -->\n**Waiting on the owner'"'"'s live check.** \(.live_check.why // "" | defang_markers)\n\nRun on the PR head:\n\n```\n\(.live_check.commands | gsub("```"; "ʼʼʼ"))\n```\n\nThen comment `Live check passed <first 7 characters of the head commit>` (or `Live check failed ...`). The merge gate waits for it."' "$result")" >/dev/null
+  gh pr comment "$pr" -R "$repo" --body "$(jq -r -L "$here/lib" 'include "meta"; "<!-- agent-sprint -->\n**Waiting on the owner'"'"'s live check.** \(.live_check.why // "" | defang_markers)\n\nRun on the PR head:\n\n```\n\(.live_check.commands | gsub("```"; "ʼʼʼ"))\n```\n\nThen comment `Live check passed <first 7 characters of the head commit>` (or `Live check failed ...`). Then merge it yourself: the merge gate leaves every live-check PR for you until https://github.com/tonhe/agent-loop/issues/35 is done."' "$result")" >/dev/null
 fi
 echo "$pr"

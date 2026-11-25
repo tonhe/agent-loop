@@ -10,9 +10,11 @@
 #   - every required status check of the base branch's rulesets succeeded on the head
 #     commit (pending, missing, skipped, neutral and failed all refuse)
 #   - no file matches protected_paths (git pathspecs, as check-diff.sh) or the loop's
-#     process paths (.github/, .claude/, CLAUDE.md, RELEASING.md, ...), and none matches
-#     protected_review_paths unless issue N has an Owner decision comment
-#   - a PR labeled agent:live-check has the owner's "Live check passed <head sha>" comment
+#     process paths (.github/, .claude/, CLAUDE.md, RELEASING.md, ...)
+#   - needs no owner approval (interim, until https://github.com/tonhe/agent-loop/issues/35:
+#     agents act as the owner, so an owner comment cannot be told from an agent's): the
+#     issue is risk:low, no protected_review_paths file changes (an Owner decision is not
+#     trusted) and the PR is not labeled agent:live-check. Otherwise "needs owner merge".
 #   - no merge conflict, and the head is up to date when the ruleset requires it
 #   - the repository is not agent-loop itself
 # Settings come from the caller workflows on the PR's base branch (loop-config.sh), so a
@@ -86,13 +88,17 @@ jq -n --arg owner "$owner" --argjson loop "$is_loop" \
   {owner: $owner, is_loop_repo: $loop, pr: $pr[0], issue: $issue[0], files: $files[0],
    files_complete: ($listed >= $changed), protected_hits: $hits[0],
    protected_review_paths: $cfg[0].protected_review_paths, rules: $rules[0],
-   checks: $checks[0], statuses: $statuses[0], behind_by: $behind}' > "$work/facts.json"
+   checks: $checks[0], statuses: $statuses[0], behind_by: $behind,
+   owner_approvals_trusted: false}' > "$work/facts.json"
 jq -L "$here/lib" 'include "merge-gate"; merge_gate' "$work/facts.json" > "$work/decision.json"
 trap - ERR
 
 if [[ $(jq -r .ok "$work/decision.json") != true ]]; then
   echo "merge-gate: REFUSED https://github.com/$repo/pull/$pr"
   jq -r '.reasons[] | "  - \(.)"' "$work/decision.json"
+  if jq -e 'any(.reasons[]; startswith("needs owner merge"))' "$work/decision.json" >/dev/null; then
+    echo "needs owner merge: the owner reviews and merges this PR by hand."
+  fi
   echo "Left for the owner. Nothing was enabled."
   exit 1
 fi

@@ -30,7 +30,7 @@ Set once: `S=${CLAUDE_PLUGIN_ROOT}/scripts` and `R=$(gh repo view --json nameWit
 5. **Tests first.** Write the test that shows the problem or the new behavior. Run it and confirm it FAILS on the current code, and fails for the reason you expect. Keep the failing output for your report.
 6. **Implement.** Make the test pass. Then run the repository's verify command (`jq -r .verify_command` of `bash $S/loop-config.sh`, e.g. `make test-all`) and make it pass. Never weaken, skip or delete an existing assertion to get green. If a golden file changes, say why in the PR body.
 7. **Docs.** If the change is visible to users (flags, output, behavior), update the README or docs in the same PR.
-8. **Live check?** If proving the change needs something only the owner can run (sudo, a live network, real hardware), do everything else and put a `live_check` in the result (step 9). The PR is then labeled `agent:live-check`, and the merge gate waits for the owner. Do not try to run it yourself with elevated rights.
+8. **Live check?** If proving the change needs something only the owner can run (sudo, a live network, real hardware), do everything else and put a `live_check` in the result (step 9). The PR is then labeled `agent:live-check`, and the owner runs the check and merges it. Do not try to run it yourself with elevated rights.
 9. **Publish.** Write `result.json` (outside the worktree, e.g. `$(mktemp -d)/result.json`):
    ```json
    {"status": "done", "summary": "...", "commit_message": "fix(x): ...", "pr_title": "...",

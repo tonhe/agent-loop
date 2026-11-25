@@ -22,7 +22,8 @@
 #   "rules": [...],                        GET repos/{repo}/rules/branches/{base}
 #   "checks": [{name, status, conclusion}],  check runs on the head commit, newest first
 #   "statuses": [{context, state}],        commit statuses on the head commit, newest first
-#   "behind_by": 0                         commits on the base that the head lacks
+#   "behind_by": 0,                        commits on the base that the head lacks
+#   "owner_approvals_trusted": false       optional, default false: see owner_merge_only
 # }
 #
 # Output: {"ok": bool, "issue": N|null, "reasons": ["...", ...]}. ok only when reasons
@@ -83,6 +84,16 @@ def live_answers($owner; $sha):
 
 def labels_of: [(.labels // [])[].name];
 
+# Interim rule, until https://github.com/tonhe/agent-loop/issues/35 is done: agents act
+# as the owner on GitHub (the owner's gh login), so an "Owner decision" or "Live check
+# passed" comment by owner_login may have been written by an agent. Until agents have
+# their own identity, the gate trusts no owner approval and enables auto-merge only for
+# PRs that need none: issue risk:low, no protected_paths or protected_review_paths file,
+# no agent:live-check. Every other PR is refused with "needs owner merge" and left for
+# the owner. merge-gate.sh sets owner_approvals_trusted to false literally; the field
+# exists so the approval rules below stay tested for when #35 lands.
+def owner_merge_url: "https://github.com/tonhe/agent-loop/issues/35";
+
 def merge_gate:
   . as $in
   | ($in.pr // {}) as $pr
@@ -91,6 +102,7 @@ def merge_gate:
   | ($in.issue) as $iss
   | ($in.rules // []) as $rules
   | ($rules | required_contexts) as $required
+  | ($in.owner_approvals_trusted == true) as $trusted
   | [
       # --- the PR is a loop PR in good order ---
       (if $in.is_loop_repo == true then
@@ -125,19 +137,27 @@ def merge_gate:
 
       # --- protected and process paths ---
       (if $in.files_complete != true then "the PR's file list is incomplete (GitHub lists at most 3000 files), so protected paths cannot be checked" else empty end),
-      ($in.protected_hits // [] | .[] | "changes protected path \(tojson) (protected_paths: the agent may not change it)"),
+      ($in.protected_hits // [] | .[] | "needs owner merge: changes protected path \(tojson) (protected_paths: the agent may not change it)"),
       ($in.files // [] | .[] | . as $f | ($f | glob_hit(process_patterns)) as $g | select($g != null)
         | "changes the loop's process: \($f | tojson) (\($g))"),
       (if $iss == null or $n == null then empty
        else ({files: ($in.files // []), comments: ($iss.comments // [])}
              | review_protected($in.protected_review_paths // ""; $in.owner)) as $rp
-         | if $rp.status == "no_decision" then
+         | if ($trusted | not) then
+             ($rp.matched[] | "needs owner merge: changes \(.file | tojson) (protected_review_paths \(.glob)); an Owner decision cannot be verified while agents act as the owner (\(owner_merge_url))")
+           elif $rp.status == "no_decision" then
              ($rp.matched[] | "changes \(.file | tojson) (protected_review_paths \(.glob)) and issue #\($n) has no Owner decision comment")
            else empty end
        end),
+      (if $trusted or $iss == null or $n == null or ($iss | type) != "object" then empty
+       elif ($iss | labels_of | index("risk:low")) == null then
+         "needs owner merge: issue #\($n) is not risk:low (\([$iss | labels_of | .[] | select(startswith("risk:"))] | if length == 0 then "no risk label" else join(", ") end)); only risk:low PRs are merged by the gate until \(owner_merge_url) is done"
+       else empty end),
 
       # --- live check ---
       (if ($pr | labels_of | index("agent:live-check")) == null then empty
+       elif ($trusted | not) then
+         "needs owner merge: labeled agent:live-check; the owner runs the live check and merges by hand, since a live-check answer cannot be verified while agents act as the owner (\(owner_merge_url))"
        else (($pr.comments // []) | live_answers($in.owner; $pr.headRefOid // "")) as $a
          | if ($a | length) == 0 then "labeled agent:live-check and the owner has not posted \"Live check passed\" for head \($pr.headRefOid // "" | .[0:7])"
            elif $a[-1] != "passed" then "the owner's live check for head \($pr.headRefOid // "" | .[0:7]) failed"
