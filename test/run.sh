@@ -2679,5 +2679,9 @@ bl_yml="$root/.github/workflows/backlog.yml"
 check "backlog.yml: the Digest step uses the tested script and knows whether there was work" "1|1|0" \
   "$(grep -c 'scripts/backlog-digest.sh' "$bl_yml")|$(grep -c '^          WORK: \${{ steps.gather.outputs.work }}$' "$bl_yml")|$(grep -c 'Nothing new to triage' "$bl_yml")"
 
+# Sprint mode (skills/, merge gate, claims, reports): in its own file.
+# shellcheck source=test/sprint.sh disable=SC1091  # checked as its own file
+source "$root/test/sprint.sh"
+
 echo; echo "$pass passed, $fail failed"
 [[ $fail -eq 0 ]]

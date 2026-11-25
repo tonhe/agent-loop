@@ -31,10 +31,45 @@ A night with no message means everything started. If Discord itself refuses a me
 
 The Eastern times move by an hour with daylight saving: triage and dev are 1:17 and 2:17 AM in winter, 2:17 and 3:17 AM in summer.
 
+## Sprint switch
+
+For a push, the owner turns on the sprint switch: dev then also runs every 2 hours and triage every 6 hours, with the same rules (each start is checked 10 minutes later, failures go to Discord). Off, only the nightly table above runs. Turn it on for the push and off after.
+
+The switch is the Worker variable `SPRINT`. Only the exact value `on` turns it on. `off`, empty or missing is off. Any other value (`ON`, `on `, `yes`) is also off, and every tick writes a warning naming the value to the Worker's log, so a typo shows there instead of quietly leaving the sprint off.
+
+With the switch on, these rows run in addition to the nightly table (`sprintSchedule` in `src/config.js`), all UTC:
+
+| Time | Start | Body sent to GitHub |
+|---|---|---|
+| 00:17, 12:17 and 18:17 | `agent-backlog.yml` | `{"ref":"main"}` |
+| 01:17, 03:17, 05:17, 09:17, 11:17, 13:17, 15:17, 17:17, 19:17, 21:17 and 23:17 | `agent-dev.yml` | `{"ref":"main","inputs":{"mode":"scheduled"}}` |
+
+Together with the nightly 06:17 and 07:17 that is triage 4 times a day (every 6 hours) and dev 12 times a day (every odd hour at :17), each triage an hour before a dev start, as at night. No sprint time repeats a nightly time, so nothing starts twice. Follow-up does not change. Checks follow at :27 of the same hours.
+
+Turn it on:
+
+```sh
+npx wrangler deploy --var SPRINT:on
+```
+
+Turn it off:
+
+```sh
+npx wrangler deploy
+```
+
+`wrangler.toml` says `SPRINT = "off"`, so any plain `npx wrangler deploy` turns the sprint off, including one made later for another reason. In the dashboard instead: Workers & Pages → `agent-loop-trigger` → Settings → Variables and Secrets → `SPRINT` → edit the value → Deploy. A value set in the dashboard also lasts only until the next `wrangler deploy`.
+
+Either way, changing `SPRINT` creates and deploys a new version of the Worker, so the rule above applies: a check whose start was scheduled before the change is skipped. Turned on at 09:20, the 09:27 check of the 09:17 dev start (which never happened) is skipped, and the 11:17 start is the first one checked. Turned off, the sprint rows leave the table, so neither they nor their checks run.
+
+Cost: every dev run uses the Claude subscription and works up to `max_issues` issues, so the sprint means up to 12 dev runs a day instead of one. A dev run still going when the next one is due does not overlap with it: the caller's `agent-dev` concurrency group holds the new run until the old one ends, and the check passes because the run was created. A dev run that starts while triage is unfinished waits for it (`scripts/wait-backlog.sh` in the loop).
+
+To try the sprint rows locally, add `SPRINT=on` to `.dev.vars` and fire, for example, `./tick.sh 09:17` and `./tick.sh 09:27`.
+
 ## Files
 
-- `src/config.js`: the schedule table. Each row names its repo, so another repo is more rows. Every time must end in 7 (a tick).
-- `wrangler.toml`: the Worker's settings and its one trigger.
+- `src/config.js`: the schedule table, and the sprint table added when the sprint switch is on. Each row names its repo, so another repo is more rows. Every time must end in 7 (a tick).
+- `wrangler.toml`: the Worker's settings, its one trigger, and the sprint switch (`SPRINT`, off).
 - `src/core.js`: the logic. `src/index.js`: the Cloudflare entry point.
 - `test/`: `npm test` (Node 20 or later, no dependencies, no network).
 - `tick.sh`: fires one tick of a locally running Worker, for testing.

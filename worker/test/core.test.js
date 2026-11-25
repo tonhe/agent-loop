@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { schedule, TRIGGER, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "../src/config.js";
-import { alertDiscord, checkRow, deployTime, dueAt, parseTokenExpiry, runTick, startRow, tickTime, tokenExpiryWarning } from "../src/core.js";
+import { schedule, sprintSchedule, TRIGGER, CHECK_AFTER_MINUTES, TOKEN_CHECK_AT, TOKEN_WARN_DAYS } from "../src/config.js";
+import { activeSchedule, alertDiscord, checkRow, deployTime, dueAt, parseTokenExpiry, runTick, startRow, tickTime, tokenExpiryWarning } from "../src/core.js";
 
 const API = "https://api.github.test";
 const HOOK = "https://discord.test/hook";
@@ -202,6 +202,160 @@ test("wrangler.toml has exactly the one trigger the config names", () => {
   assert.ok(block, "wrangler.toml has a [triggers] crons list");
   assert.deepEqual([...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]), [TRIGGER]);
   assert.match(toml, /^workers_dev = false$/m);
+});
+
+test("wrangler.toml leaves the sprint switch off", () => {
+  const toml = readFileSync(fileURLToPath(new URL("../wrangler.toml", import.meta.url)), "utf8");
+  assert.match(toml, /^\[vars\]\nSPRINT = "off"$/m);
+});
+
+// ---- the sprint switch ----
+
+// Every start and every check over one whole day of ticks, as "HH:MM workflow".
+function oneDay(rows) {
+  const started = [];
+  const checked = [];
+  for (let h = 0; h < 24; h++) {
+    for (let m = 7; m < 60; m += 10) {
+      const due = dueAt(rows, utc(h, m), CHECK_AFTER_MINUTES);
+      for (const r of due.start) started.push(`${due.time} ${r.workflow}`);
+      for (const c of due.check) checked.push(`${due.time} ${c.row.workflow}`);
+    }
+  }
+  return { started, checked };
+}
+const count = (list, workflow) => list.filter((s) => s.endsWith(` ${workflow}`)).length;
+const sprintOn = activeSchedule(schedule, sprintSchedule, "on").rows;
+
+test("activeSchedule: only the exact value \"on\" adds the sprint rows", () => {
+  assert.deepEqual(activeSchedule(schedule, sprintSchedule, "on"), { rows: [...schedule, ...sprintSchedule], sprint: true, warning: null });
+  for (const quiet of [undefined, null, "", "off"]) {
+    assert.deepEqual(activeSchedule(schedule, sprintSchedule, quiet), { rows: schedule, sprint: false, warning: null }, String(quiet));
+  }
+});
+
+test("activeSchedule: any other value is off, with a warning that names it", () => {
+  for (const odd of ["ON", "On", "on ", " on", "yes", "true", "1", "of", true, 1]) {
+    const a = activeSchedule(schedule, sprintSchedule, odd);
+    assert.equal(a.rows, schedule, JSON.stringify(odd));
+    assert.equal(a.sprint, false);
+    assert.ok(a.warning.includes(`SPRINT is ${JSON.stringify(odd)}`), a.warning);
+    assert.match(a.warning, /the sprint switch is off/);
+  }
+});
+
+test("activeSchedule: does not change the tables it is given", () => {
+  const nightly = [triage];
+  const sprint = [dev];
+  activeSchedule(nightly, sprint, "on");
+  assert.deepEqual([nightly, sprint], [[triage], [dev]]);
+});
+
+test("config: the sprint table is the agreed schedule", () => {
+  const rows = sprintSchedule.map((r) => [r.at.join(","), r.repo, r.workflow, JSON.stringify(r.body)]);
+  assert.deepEqual(rows, [
+    ["00:17,12:17,18:17", "tonhe/viaduct", "agent-backlog.yml", '{"ref":"main"}'],
+    ["01:17,03:17,05:17,09:17,11:17,13:17,15:17,17:17,19:17,21:17,23:17", "tonhe/viaduct", "agent-dev.yml", '{"ref":"main","inputs":{"mode":"scheduled"}}'],
+  ]);
+});
+
+test("config: every sprint time is one the trigger fires at", () => {
+  for (const row of sprintSchedule) {
+    assert.match(row.repo, /^[\w.-]+\/[\w.-]+$/);
+    assert.match(row.workflow, /^[\w.-]+\.ya?ml$/);
+    assert.equal(typeof row.body.ref, "string");
+    for (const at of row.at) assert.match(at, /^([01]\d|2[0-3]):[0-5]7$/, `${at} is HH:M7`);
+  }
+});
+
+test("config: with the switch on, no workflow of a repo is listed twice at one time", () => {
+  const seen = new Set();
+  for (const row of sprintOn) {
+    for (const at of row.at) {
+      const key = `${row.repo} ${row.workflow} ${at}`;
+      assert.ok(!seen.has(key), `${key} is listed twice`);
+      seen.add(key);
+    }
+  }
+});
+
+test("sprint off: a whole day of ticks starts and checks exactly the nightly table", () => {
+  for (const value of [undefined, "off", "ON"]) {
+    assert.deepEqual(oneDay(activeSchedule(schedule, sprintSchedule, value).rows), oneDay(schedule), String(value));
+  }
+  assert.deepEqual(oneDay(schedule).started, ["01:47 agent-followup.yml", "06:17 agent-backlog.yml", "07:17 agent-dev.yml", "13:47 agent-followup.yml"]);
+});
+
+test("sprint on: a whole day starts dev 12 times 2 hours apart, triage 4 times, follow-up twice", () => {
+  const { started } = oneDay(sprintOn);
+  assert.equal(count(started, "agent-dev.yml"), 12);
+  assert.equal(count(started, "agent-backlog.yml"), 4);
+  assert.equal(count(started, "agent-followup.yml"), 2);
+  assert.equal(started.length, 18);
+  // Every nightly start is still made.
+  for (const s of oneDay(schedule).started) assert.ok(started.includes(s), s);
+  // Dev on every odd hour at :17, so the gap is always 2 hours, midnight included.
+  const devHours = started.filter((s) => s.endsWith(" agent-dev.yml")).map((s) => Number(s.slice(0, 2)));
+  assert.deepEqual(devHours, [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]);
+  for (const s of started.filter((x) => x.endsWith(" agent-dev.yml"))) assert.equal(s.slice(2, 5), ":17");
+  // Triage every 6 hours, each an hour before a dev start.
+  const triageAt = started.filter((s) => s.endsWith(" agent-backlog.yml")).map((s) => s.slice(0, 5));
+  assert.deepEqual(triageAt, ["00:17", "06:17", "12:17", "18:17"]);
+  for (const t of triageAt) {
+    const hourLater = `${String(Number(t.slice(0, 2)) + 1).padStart(2, "0")}:17 agent-dev.yml`;
+    assert.ok(started.includes(hourLater), `${t} triage is followed by ${hourLater}`);
+  }
+});
+
+test("sprint on: no tick starts the same workflow twice", () => {
+  const { started } = oneDay(sprintOn);
+  assert.equal(new Set(started).size, started.length);
+});
+
+test("sprint on: every start, sprint rows included, is checked 10 minutes later", () => {
+  const { started, checked } = oneDay(sprintOn);
+  const tenLater = started.map((s) => {
+    const [hh, mm] = s.slice(0, 5).split(":").map(Number);
+    const t = (hh * 60 + mm + 10) % (24 * 60);
+    return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}${s.slice(5)}`;
+  });
+  assert.deepEqual([...checked].sort(), [...tenLater].sort());
+  assert.ok(checked.includes("09:27 agent-dev.yml"));
+  assert.ok(checked.includes("00:27 agent-backlog.yml"));
+});
+
+test("runTick, sprint on: 09:17 starts dev, 09:27 checks it since 09:17", async () => {
+  const start = fakeFetch([["/dispatches", { status: 204 }]]);
+  const r1 = await tick(utc(9, 17), start, { schedule: sprintOn });
+  assert.deepEqual(r1, { time: "09:17", started: ["tonhe/viaduct agent-dev.yml"], checked: [], skipped: [], problems: [] });
+  assert.equal(start.calls[0].url, `${API}/repos/tonhe/viaduct/actions/workflows/agent-dev.yml/dispatches`);
+  assert.deepEqual(start.calls[0].body, { ref: "main", inputs: { mode: "scheduled" } });
+
+  const none = fakeFetch([["/runs", { status: 200, body: '{"total_count":0}' }], [HOOK, { status: 204 }]]);
+  const r2 = await tick(utc(9, 27), none, { schedule: sprintOn });
+  assert.equal(new URL(none.calls[0].url).searchParams.get("created"), ">=2026-11-26T09:17:00Z");
+  assert.match(r2.problems[0], /tonhe\/viaduct agent-dev\.yml should have started at 2026-11-26T09:17:00Z/);
+});
+
+test("runTick, sprint off: the sprint ticks make no request", async () => {
+  for (const [h, m] of [[0, 17], [0, 27], [9, 17], [9, 27], [23, 17], [23, 27]]) {
+    const f = fakeFetch([]);
+    const r = await tick(utc(h, m), f, { schedule });
+    assert.deepEqual([r.started, r.checked, r.problems], [[], [], []], `${h}:${m}`);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("runTick, sprint on: turning it on creates a new version, so the first check is skipped", async () => {
+  // Switched on at 09:20. The 09:17 sprint start was never made (the switch was off).
+  const f = fakeFetch([]);
+  const r = await tick(utc(9, 27), f, { schedule: sprintOn, deployedAt: utc(9, 20) });
+  assert.deepEqual(r, { time: "09:27", started: [], checked: [], skipped: ["tonhe/viaduct agent-dev.yml"], problems: [] });
+  assert.equal(f.calls.length, 0);
+  // Two hours later the sprint start was this version's, and it is checked.
+  const later = fakeFetch([["/runs", { status: 200, body: '{"total_count":1}' }]]);
+  const r2 = await tick(utc(11, 27), later, { schedule: sprintOn, deployedAt: utc(9, 20) });
+  assert.deepEqual(r2.checked, ["tonhe/viaduct agent-dev.yml"]);
 });
 
 // ---- talking to GitHub ----

@@ -33,6 +33,19 @@ export function dueAt(schedule, scheduledTime, checkAfterMinutes, deployedAt = n
   };
 }
 
+// The table this tick runs, from the sprint switch (the SPRINT variable, passed
+// in as `sprint`). Only the exact string "on" adds the sprint rows. Missing,
+// empty and "off" are off and say nothing. Any other value is also off, with a
+// warning naming it, so a typo such as "ON" or "on " shows in the Worker's log
+// instead of silently leaving the sprint off.
+// Returns { rows, sprint, warning }: sprint is true or false, warning a string
+// or null.
+export function activeSchedule(schedule, sprintSchedule, sprint) {
+  if (sprint === "on") return { rows: [...schedule, ...sprintSchedule], sprint: true, warning: null };
+  if (sprint == null || sprint === "" || sprint === "off") return { rows: schedule, sprint: false, warning: null };
+  return { rows: schedule, sprint: false, warning: `SPRINT is ${JSON.stringify(sprint)}, which is neither "on" nor "off"; the sprint switch is off.` };
+}
+
 // When this version of the Worker was deployed (epoch ms), from Cloudflare's
 // version metadata binding. null when it is absent or unreadable.
 export function deployTime(metadata) {

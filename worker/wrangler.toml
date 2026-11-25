@@ -18,6 +18,13 @@ crons = ["7-59/10 * * * *"]
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
+# The sprint switch. "on" adds the sprint rows in src/config.js (dev every
+# 2 hours, triage every 6) to the nightly table; anything else is off. Leave it
+# "off" here and turn it on for a push with `npx wrangler deploy --var SPRINT:on`
+# (or in the dashboard). A plain `npx wrangler deploy` sets it back to "off".
+[vars]
+SPRINT = "off"
+
 [observability]
 enabled = true
 

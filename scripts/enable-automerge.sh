@@ -3,7 +3,10 @@
 # requiring status checks with nobody allowed to bypass. Without that, GitHub would
 # merge immediately, so this refuses.
 # The base branch is the PR's own (it may be a per-issue base), never an assumed default.
-# Usage: enable-automerge.sh PR      Env: GH_TOKEN (PAT), GITHUB_REPOSITORY
+# Usage: enable-automerge.sh PR      Env: GH_TOKEN (PAT), GITHUB_REPOSITORY,
+#        HEAD_SHA (optional): merge only while the PR head is still this commit
+#        (gh --match-head-commit). merge-gate.sh passes the commit it checked, so a push
+#        after the check cannot ride on the gate's approval.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 pr=$1
@@ -29,5 +32,10 @@ for id in $ids; do
   fi
 done
 
-gh pr merge "$pr" -R "$GITHUB_REPOSITORY" --auto --squash
+pin=()
+if [[ -n "${HEAD_SHA:-}" ]]; then
+  [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::HEAD_SHA is not a commit id. Refusing."; exit 1; }
+  pin=(--match-head-commit "$HEAD_SHA")
+fi
+gh pr merge "$pr" -R "$GITHUB_REPOSITORY" --auto --squash "${pin[@]}"
 echo "Auto-merge enabled for #$pr"

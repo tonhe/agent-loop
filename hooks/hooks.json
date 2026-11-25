@@ -1,0 +1,9 @@
+{
+  "description": "agent-loop guard: no merge except through merge-gate.sh, no comment in the owner's voice, no loosening of labels, rulesets or the plugin itself.",
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/guard.sh \"${CLAUDE_PLUGIN_ROOT}\"" }] }
+    ]
+  }
+}
