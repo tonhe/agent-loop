@@ -335,7 +335,7 @@ The ruleset's empty bypass list is what stops the PAT (which acts as you) from s
 
 ## Testing this repo
 
-`bash test/run.sh` runs offline tests of the selection, selection-order, candidate, dependency, base-branch, milestone, plan-validation, release, planning, protected-path, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean. The Worker has its own tests: `npm test` in `worker/` (Node 20 or later, no dependencies).
+`bash test/run.sh` runs offline tests of the selection, selection-order, candidate (closed blockers, Owner decisions, paired-epic children), dependency, blocker-audit, base-branch, milestone, plan-validation, plan-apply (including a failed `gh` call), release, planning, protected-path, PR-to-issue mapping, review-gate, owner-mode (linked issues, protected listing, advisory exit, comment update), review-split, review-coverage, digest, followup, backlog-wait, diff-check, and prompt-render logic. `actionlint` and `shellcheck` should be clean. The Worker has its own tests: `npm test` in `worker/` (Node 20 or later, no dependencies).
 
 ## Known limits and residual risk
 
