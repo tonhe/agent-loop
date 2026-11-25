@@ -13,6 +13,8 @@
 # taken from the head branch name, which publish-pr.sh sets (issue-N), never from the PR
 # body: the body starts with text the model wrote. The body marker publish-pr.sh appends
 # (<!-- agent-loop issue=N -->) must be there and every such marker must name the same N.
+# N is a plain number: issue-0 and issue-036 are agent branches that name no issue, so
+# they fail the check.
 #
 #   fork PR, or not opened by the owner        -> run=false (theirs to review, as before)
 #   branch not issue-N and no marker in body   -> run=true, mode=owner (no issue output)
@@ -34,27 +36,32 @@ if [[ "${FORK:-}" == "true" || -z "${OWNER_LOGIN:-}" || "${AUTHOR:-}" != "$OWNER
   exit 0
 fi
 
-# Same shape as agent_branch in lib/base.jq. ^ and $ are whole-string anchors here.
-n=""
-if [[ "$head" =~ ^issue-([0-9]+)$ ]]; then n=${BASH_REMATCH[1]}; fi
-markers=$(grep -oE 'agent-loop issue=[0-9]+' <<<"${BODY:-}" | grep -oE '[0-9]+$' | sort -u || true)
+# The branch-to-issue rule is lib/pr.jq, shared with the follow-up job and selection. The
+# branch name and the body go in as jq string arguments; the answers are jq's own words
+# (true, false) and a number.
+here=$(cd "$(dirname "$0")/.." && pwd)
+link=$(jq -nc -L "$here/lib" --arg h "$head" --arg b "${BODY:-}" 'include "pr"; {headRefName: $h, body: $b} | pr_link')
+is_head=$(jq -r '.issue_head' <<<"$link")
+has_markers=$(jq -r '.markers' <<<"$link")
+agrees=$(jq -r '.agrees' <<<"$link")
+n=$(jq -r '.issue // empty' <<<"$link")
 
-if [[ -z "$n" && -z "$markers" ]]; then
+if [[ "$is_head" != true && "$has_markers" != true ]]; then
   echo "Owner PR (not a loop PR): advisory review."
   echo "run=true" >> "$out"
   echo "mode=owner" >> "$out"
   exit 0
 fi
-if [[ -z "$n" ]]; then
+if [[ "$is_head" != true ]]; then
   echo "::error::The PR body carries an agent-loop issue marker but the head branch is not an agent branch (issue-N). Refusing to guess the issue."
   exit 1
 fi
-if [[ -z "$markers" ]]; then
-  echo "::error::The head branch is an agent branch (issue-$n) but the PR body has no agent-loop issue marker."
+if [[ "$has_markers" != true ]]; then
+  echo "::error::The head branch is an agent branch (issue-N) but the PR body has no agent-loop issue marker."
   exit 1
 fi
-if [[ "$markers" != "$n" ]]; then
-  echo "::error::The PR body names an issue other than #$n, the one its branch (issue-$n) belongs to."
+if [[ "$agrees" != true || -z "$n" ]]; then
+  echo "::error::The PR body's agent-loop issue marker does not name the issue its branch (issue-N) belongs to, or the branch number is not a plain issue number."
   exit 1
 fi
 
