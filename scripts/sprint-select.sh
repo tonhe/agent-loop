@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # The issues a local sprint may take, in order. Two lists:
-#   ready   exactly the nightly selection (select-issues.sh scheduled, unchanged), but the
-#           whole ordered queue rather than the first max_issues: its first max_issues
-#           entries are what tonight's run would pick
+#   ready   the nightly selection (select-issues.sh scheduled, unchanged, in its order),
+#           the whole ordered queue rather than the first max_issues. With a MILESTONE
+#           it keeps only the open issues in that milestone: the finish line is the
+#           sprint's scope (#55). Without one it is the whole queue, and its first
+#           max_issues entries are what tonight's run would pick
 #   paired  agent:paired issues in the finish-line milestone, which only a local agent
 #           may take (lib/sprint.jq, paired_ready); none without a milestone
 # Settings (owner, selection_order) come from the caller workflows (loop-config.sh), so
@@ -20,6 +22,11 @@ export OWNER_LOGIN; OWNER_LOGIN=$(jq -r .owner_login <<<"$cfg")
 export SELECTION_ORDER; SELECTION_ORDER=$(jq -r .selection_order <<<"$cfg")
 
 ready=$(MAX_ISSUES=100 bash "$here/scripts/select-issues.sh" scheduled)
+if [[ -n "$milestone" ]]; then
+  # Only the finish-line milestone's open issues, keeping the nightly order.
+  in_ms=$(gh issue list -R "$repo" --milestone "$milestone" --state open --limit 500 --json number --jq '[.[].number]')
+  ready=$(jq -nc --argjson r "$ready" --argjson m "$in_ms" '[$r[] | select(. as $n | $m | index($n) != null)]')
+fi
 
 paired='[]'
 if [[ -n "$milestone" ]]; then
