@@ -1,5 +1,5 @@
 # Decide which of the owner's issues the backlog manager should look at.
-# Input:  [ {number,title,body,labels,author,createdAt,comments:[{author,body,createdAt}]} ]
+# Input:  [ {number,title,body,labels,author,createdAt,comments:[{author,body,createdAt}],milestone} ]
 # Args:   --arg owner LOGIN  --argjson max N  --argjson open [open issue numbers]
 #         --argjson native {"<issue number>": [open native blocker numbers]}   optional, default {}
 #         --argjson parents {"<issue number>": native parent issue number}     optional, default {}
@@ -42,6 +42,9 @@ def assessed_at:
   | {
       number, title, body,
       labels: [.labels[].name],
+      # The issue's milestone, or null. apply-backlog.sh checks it against the milestones
+      # approved for release (#61); the model sees it next to the release mode facts.
+      milestone: (if (.milestone | type) == "object" then {number: .milestone.number, title: .milestone.title} else null end),
       # Blockers the body names that are closed now. A candidate is never blocked, so every
       # numbered blocker in its body is one of these. Without this fact the model reads
       # "Blocked by #4" in the body and triages the issue as if #4 were still open.

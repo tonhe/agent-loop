@@ -11,6 +11,7 @@ risk:medium|fbca04|Needs care or judgment
 risk:high|d93f0b|Security, data, release, or broad impact
 type:bug|d73a4a|Something is broken
 type:feature|a2eeef|New capability
+type:enhancement|84b6eb|Change to existing behaviour or output; ships in a patch release
 type:docs|0075ca|Documentation only
 type:test|bfd4f2|Tests only
 type:refactor|c5def5|No behavior change

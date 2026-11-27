@@ -1618,39 +1618,46 @@ check "active milestone: none open" "null" "$(am_ '[]')"
 
 # ---------- selection order (select.jq --arg order) ----------
 so_in='{"prs":[],"issues":[
- {"number":40,"createdAt":"2026-01-01T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:feature"}],"body":""},
+ {"number":40,"createdAt":"2026-01-01T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:enhancement"}],"body":""},
  {"number":41,"createdAt":"2026-01-02T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"}],"body":""},
  {"number":42,"createdAt":"2026-01-03T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:docs"}],"body":""},
- {"number":43,"createdAt":"2026-01-04T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"tech-debt"},{"name":"type:feature"}],"body":""},
+ {"number":43,"createdAt":"2026-01-04T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"tech-debt"},{"name":"type:enhancement"}],"body":""},
  {"number":44,"createdAt":"2026-01-05T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:refactor"}],"body":""},
  {"number":45,"createdAt":"2026-01-06T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:bug"},{"name":"tech-debt"}],"body":""},
  {"number":46,"createdAt":"2026-01-07T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:chore"}],"body":""},
  {"number":47,"createdAt":"2026-01-08T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:bug"}],"body":""},
  {"number":48,"createdAt":"2026-01-09T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:test"}],"body":""},
  {"number":49,"createdAt":"2026-01-10T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"tech-debt"}],"body":""},
- {"number":50,"createdAt":"2026-01-11T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:feature"}],"body":"","milestone":{"number":1}}]}'
+ {"number":50,"createdAt":"2026-01-11T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:feature"}],"body":"","milestone":{"number":1}},
+ {"number":51,"createdAt":"2026-01-12T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:bug"}],"body":"","milestone":{"number":1}},
+ {"number":52,"createdAt":"2026-01-13T00:00:00Z","author":{"login":"tonhe"},"labels":[{"name":"agent:ready"},{"name":"type:enhancement"}],"body":"","milestone":{"number":1}}]}'
+# Feature #50 is in milestone 1. Where milestone 1 is not given as approved for release
+# (#61) the run is in maintenance mode and #50 is never picked; test/release-mode.sh
+# tests that rule on its own.
+ms1_release='[{"number":1,"dueOn":null,"description":"agent-loop: release"}]'
 so() { jq -c --arg owner tonhe --argjson max "${3:-20}" --argjson open '[]' --argjson milestones "${2:-[]}" --arg order "$1" -L "$root/lib" -f "$root/lib/select.jq" <<<"$so_in" 2>&1; }
 so_default=$(jq -c --arg owner tonhe --argjson max 20 --argjson open '[]' -L "$root/lib" -f "$root/lib/select.jq" <<<"$so_in")
-check "order: no order argument is oldest first" "[40,41,42,43,44,45,46,47,48,49,50]" "$so_default"
+check "order: no order argument is oldest first" "[40,41,42,43,44,45,46,47,48,49,51,52]" "$so_default"
 check "order: oldest gives exactly the default output" "$so_default" "$(so oldest)"
 check "order: default equals oldest with milestones too" \
   "$(jq -c --arg owner tonhe --argjson max 20 --argjson open '[]' --argjson milestones '[{"number":1,"dueOn":null}]' -L "$root/lib" -f "$root/lib/select.jq" <<<"$so_in")" \
   "$(so oldest '[{"number":1,"dueOn":null}]')"
-check "order: type -> bugs, tech-debt, upkeep, features, unlabelled; oldest first inside each" \
-  "[45,47,43,49,42,44,46,48,40,50,41]" "$(so type)"
+check "order: type -> bugs, tech-debt, upkeep, enhancements, unlabelled; oldest first inside each" \
+  "[45,47,51,43,49,42,44,46,48,40,52,41]" "$(so type)"
 check "order: type, bug group oldest first (tie-break by age)" "[45,47]" "$(so type '[]' 2)"
 check "order: type, a bug that is also tech-debt counts as a bug" "45" "$(so type | jq '.[0]')"
-check "order: type, tech-debt plus type:feature counts as tech-debt" "[43,49]" "$(so type | jq -c '.[2:4]')"
-check "order: type, upkeep labels are one group, oldest first" "[42,44,46,48]" "$(so type | jq -c '.[4:8]')"
+check "order: type, tech-debt plus type:enhancement counts as tech-debt" "[43,49]" "$(so type | jq -c '.[3:5]')"
+check "order: type, upkeep labels are one group, oldest first" "[42,44,46,48]" "$(so type | jq -c '.[5:9]')"
+check "order: type, enhancements come after upkeep" "[40,52]" "$(so type | jq -c '.[9:11]')"
 check "order: type, an issue with none of the labels goes last" "41" "$(so type | jq '.[-1]')"
-check "order: type, milestone outranks type (feature in the preferred milestone before a bug without one)" \
-  "[50,45,47]" "$(so type '[{"number":1,"dueOn":null}]' 3)"
-check "order: type, max applied after ordering" "[45,47,43]" "$(so type '[]' 3)"
+check "order: type, milestone outranks type (a feature in the preferred, approved milestone before a bug without one); bug, enhancement, feature inside it" \
+  "[51,52,50,45]" "$(so type "$ms1_release" 4)"
+check "order: type, max applied after ordering" "[45,47,51]" "$(so type '[]' 3)"
 so bogus >/dev/null 2>&1; check "order: select.jq refuses an unknown order" "5" "$?"
 : > "$gs/log"
 out=$(S_READY="$(jq -c .issues <<<"$so_in")" S_GRAPHQL='{"data":{"repository":{"issues":{"nodes":[]}}}}' S_MILESTONES='[]' MAX_ISSUES=3 SELECTION_ORDER=type \
       gsrun bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null)
-check "select-issues: SELECTION_ORDER=type reaches select.jq" "[45,47,43]" "$out"
+check "select-issues: SELECTION_ORDER=type reaches select.jq" "[45,47,51]" "$out"
 out=$(S_READY="$(jq -c .issues <<<"$so_in")" S_GRAPHQL='{"data":{"repository":{"issues":{"nodes":[]}}}}' S_MILESTONES='[]' MAX_ISSUES=3 \
       gsrun bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null)
 check "select-issues: SELECTION_ORDER unset is oldest first" "[40,41,42]" "$out"
@@ -2678,6 +2685,10 @@ rm -rf "$bw"
 bl_yml="$root/.github/workflows/backlog.yml"
 check "backlog.yml: the Digest step uses the tested script and knows whether there was work" "1|1|0" \
   "$(grep -c 'scripts/backlog-digest.sh' "$bl_yml")|$(grep -c '^          WORK: \${{ steps.gather.outputs.work }}$' "$bl_yml")|$(grep -c 'Nothing new to triage' "$bl_yml")"
+
+# Release mode, maintenance mode and type:enhancement (#61): in its own file.
+# shellcheck source=test/release-mode.sh disable=SC1091  # checked as its own file
+source "$root/test/release-mode.sh"
 
 # Sprint mode (skills/, merge gate, claims, reports): in its own file.
 # shellcheck source=test/sprint.sh disable=SC1091  # checked as its own file

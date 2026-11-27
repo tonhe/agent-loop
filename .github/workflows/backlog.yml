@@ -51,6 +51,11 @@ jobs:
           "$RUNNER_TEMP/agent-loop/scripts/backlog-candidates.sh" "$W"
           count=$(jq length "$W/candidates.json")
           echo "count=$count" >> "$GITHUB_OUTPUT"
+          # Release mode or maintenance mode (#61): an open milestone whose description
+          # has the line "agent-loop: release". Shown to the model and enforced on apply.
+          "$RUNNER_TEMP/agent-loop/scripts/release-mode.sh" > "$W/release-mode.json" \
+            || { echo "::warning::Release mode check failed; triage treats the repository as in maintenance mode."
+                 echo '{"mode":"maintenance","approved":[]}' > "$W/release-mode.json"; }
           # Milestone planning: a script decides whether a proposal is due (lib/planning.jq).
           # Claude then runs even with no issue to triage.
           plan_due=false
@@ -75,7 +80,9 @@ jobs:
         run: |
           L="$RUNNER_TEMP/agent-loop"; W="$RUNNER_TEMP/work"
           { "$L/scripts/render-prompt.sh" "$L/prompts/backlog.md"
-            echo; echo '```json'; cat "$W/candidates.json"; echo '```'; } > "$W/prompt.md"
+            echo; echo '```json'; cat "$W/candidates.json"; echo '```'
+            echo; echo "## Release mode facts"; echo
+            echo '```json'; jq . "$W/release-mode.json"; echo '```'; } > "$W/prompt.md"
           # Only when plan-due.sh said so. The facts hold the owner's own issues only.
           if [[ -s "$W/planning.json" && $(jq -r '.due' "$W/planning.json") == true ]]; then
             { echo; echo "## Milestone planning facts"; echo
@@ -176,6 +183,7 @@ jobs:
             ${{ runner.temp }}/work/blocked.json
             ${{ runner.temp }}/work/validated.json
             ${{ runner.temp }}/work/planning.json
+            ${{ runner.temp }}/work/release-mode.json
             ${{ runner.temp }}/work/plan-body.md
             ${{ runner.temp }}/work/digest.md
             ${{ runner.temp }}/work/audit-plan.json
