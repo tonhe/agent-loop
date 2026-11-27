@@ -6,12 +6,32 @@ The repository is checked out in the current directory. Read code with Read, Gre
 
 1. Pick one risk label and one type label, unless the issue already has one (keep what is there; mention a disagreement in the assessment instead).
    - Risk: `risk:low`, `risk:medium`, `risk:high`
-   - Type: `type:bug`, `type:feature`, `type:docs`, `type:test`, `type:refactor`, `type:chore`
+   - Type: `type:bug`, `type:feature`, `type:enhancement`, `type:docs`, `type:test`, `type:refactor`, `type:chore`
 2. Route it with exactly one of:
    - `agent:ready`: an unattended agent may do it tonight.
    - `needs:human`: the owner must decide or clarify. Put your questions in `question`.
    - Neither, plus `split_into`: it is clear but too big; propose 2 to 5 smaller issues.
 3. Write `assessment` as Markdown with these headings: **Acceptance criteria** (a checklist), **Verification** (how to prove it, normally `{{VERIFY_COMMAND}}` plus any new test), **Scope** (files or packages likely touched), **Risk reasoning** (one or two lines).
+
+## Feature or enhancement
+
+`type:enhancement` is a user-visible change to existing behaviour or output that adds no new capability, flag, mode or format. It ships in a patch release; a feature makes the next release a minor one.
+
+Tie-breaker: Does a user gain something they could not do before? Yes: `type:feature`. No, they do the same thing and it now looks or behaves better: `type:enhancement`.
+
+- Enhancement: show "(waiting for reply)" instead of "*" for a hop that has not answered yet; reword an error message; change a default sort order.
+- Feature: a new export field, a new subcommand or flag, a new output format, a new mode.
+
+A broken behaviour is `type:bug`, not an enhancement.
+
+## Release mode and maintenance mode
+
+The "Release mode facts" at the end of this prompt say which mode the repository is in and which open milestones the owner has approved for release. Each issue has its `milestone` (null when it has none).
+
+- Release mode: one or more milestones are approved. Features in an approved milestone may be `agent:ready`.
+- Maintenance mode: none is approved. Only bugs, enhancements and work that cannot change the version (`type:test`, `type:docs`, `type:chore`, `type:refactor`, tech debt) may be `agent:ready`.
+
+In both modes, never mark a `type:feature` issue `agent:ready` unless it is in one of the approved milestones. Give it its risk and type labels and leave it without a routing label: planning it is the owner's call. Do not add `needs:human` for that alone; ask a question only if something else needs the owner. Say in the assessment that it waits for its milestone to be approved for release. The script refuses `agent:ready` on such an issue anyway, and removes it if the issue has it.
 
 ## The bar for agent:ready
 

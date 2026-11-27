@@ -35,6 +35,8 @@ Each project repo carries only four small caller workflows (`examples/caller/`).
 | `agent:paired` issues are never picked by the nightly dev run and never re-routed or split by triage; the label cannot be added or removed by the plan | `lib/select.jq`, `lib/validate-plan.jq` |
 | Sub-issues of an `agent:paired` epic are labeled `agent:paired` by triage, never `needs:human` or `agent:ready` (one it already carries is removed), and are not split. A sub-issue is an issue whose native parent issue, or a body line starting with `Part of #N`, names an open `agent:paired` issue of yours. A script decides this, not the model | `lib/paired.jq` and `native-parents.sh` find the parent; `lib/candidates.jq` records it (`paired_parent`); `apply-backlog.sh` passes it on; `lib/validate-plan.jq` adds the label and drops the routing |
 | Triage never changes a label on an issue with an "Owner decision" comment (yours, starting with `Owner decision`; the same test as for protected paths): no label added or removed, routing, risk and type alike, and no split. It may only post its assessment | `lib/candidates.jq` records the fact from the comments (`owner_decision`, using `owner_decisions` in `lib/glob.jq`); `apply-backlog.sh` passes it on; `lib/validate-plan.jq` drops the changes |
+| A `type:feature` issue is marked `agent:ready`, and picked, only when it is in an open milestone you approved for release (`agent-loop: release` in its description). In maintenance mode no feature is ready or picked, `agent:ready` or not | `lib/release-mode.jq`; `release-mode.sh` reads the mode; `apply-backlog.sh` passes it on; `lib/validate-plan.jq` refuses and removes the label; `lib/select.jq` and `sprint-select.sh` skip the issue |
+| A `feat` commit or PR title prefix (a minor bump) only on a `type:feature` issue; on any other it becomes the type's prefix (`enhance`, `fix`, ...) | `publish-pr.sh` (`no_feat_prefix` in `lib/release-mode.jq`) |
 | Triage can never set a milestone | `schemas/backlog-plan.json` has no such field; `lib/validate-plan.jq` builds its output field by field, so one smuggled in is dropped; `apply-backlog.sh` never passes one to `gh` |
 | Release issues only propose: never a tag, never a GitHub release, never a deployment approval | `release-issue.sh` only creates or edits one issue; PAT has no Deployments permission |
 | Only a Release issue the loop filed is ever edited (exact title, owner as author, `release` label and the `<!-- agent-release -->` marker); one you wrote by hand is left alone and not duplicated | `lib/release.jq` (`existing_release`, `handwritten_release`) |
@@ -177,8 +179,9 @@ Inside each milestone group the order is set by the dev workflow input `selectio
   1. `type:bug`
   2. `tech-debt` (the plain label, not a `type:` label)
   3. `type:refactor`, `type:chore`, `type:test`, `type:docs` (one group)
-  4. `type:feature`
-  5. issues with none of these labels
+  4. `type:enhancement`
+  5. `type:feature`
+  6. issues with none of these labels
 
   An issue that fits several groups counts in the earliest one, so a `type:bug` that is also `tech-debt` is a bug.
 
@@ -188,9 +191,42 @@ Pick `type` when the backlog holds old feature or stretch issues: with `oldest` 
       selection_order: type
 ```
 
-`agent:paired` issues and the loop's own Release and Plan issues are never in the list.
+`agent:paired` issues and the loop's own Release and Plan issues are never in the list, and neither is a `type:feature` issue outside a milestone approved for release (see "Release mode and maintenance mode").
 
 Before it selects, a run in mode `scheduled` checks for a run of the backlog workflow (`backlog_workflow`, default `agent-backlog.yml`) that has not finished, whether in progress, queued or held back, and waits for it, so it does not pick from labels that triage is about to change (`scripts/wait-backlog.sh`). It checks every 30 seconds for at most `backlog_wait_minutes` (default 15, at most 20; `0` = never wait), then selects either way. The digest says when a run waited and when it gave up waiting. Manual and urgent runs name their issue and never wait. If the runs cannot be listed (no `actions: read` in the caller, wrong file name, GitHub error), the run log carries a warning and selection starts at once.
+
+## Release mode and maintenance mode
+
+A feature makes the next release a minor one. Once one is merged, no patch release can ship from the default branch until that minor is ready. So the loop only builds features for a release you have planned.
+
+- **Release mode:** at least one open milestone is approved for release. Features in an approved milestone may be `agent:ready` and are picked.
+- **Maintenance mode:** no open milestone is approved. No feature is marked `agent:ready` or picked.
+
+In both modes, these may be `agent:ready` in any milestone or in none, because they ship in a patch: `type:bug`, `type:enhancement`, `type:test`, `type:docs`, `type:chore`, `type:refactor` and `tech-debt`.
+
+**The switch.** Approve a milestone by putting this line in its description, on a line of its own (case and spaces around it don't matter):
+
+```
+agent-loop: release
+```
+
+Add it when you plan the release, for example after answering its `Plan vX.Y` issue. Closing the milestone when you release ends release mode. An open milestone without the line, such as one that collects features for later, doesn't count. Release mode needs no workflow change, and it's on the milestone page for anyone to see. The loop never writes milestones.
+
+**Where it's enforced:**
+
+- **Triage:** the backlog manager is told the mode and the approved milestones, and each issue's milestone. `validate-plan.jq` refuses `agent:ready` on a `type:feature` issue outside an approved milestone, and removes it if the issue has it. The issue gets no `needs:human`: planning it is your call. The digest notes the refusal. An Owner decision still freezes the issue's labels.
+- **Selection:** `select.jq` skips such an issue even when it is labelled `agent:ready`. A sprint (`sprint-select.sh`) does the same, for its `agent:paired` issues too. Manual and urgent runs name their issue, and running them is your approval, so they're unchanged.
+- **Failures:** if the milestones can't be read, the run is in maintenance mode.
+
+**`type:enhancement`** is a user-visible change to existing behaviour or output that adds no new capability, flag, mode or format. Showing "(waiting for reply)" instead of "*" is an enhancement. A new export field, subcommand, flag or output format is a feature. Triage applies the test "does a user gain something they could not do before?".
+
+**Commit prefix.** An enhancement is committed as `enhance:` (or `enhance(scope):`), which is a patch:
+
+- The dev prompt and the `work-issue` skill say so.
+- `publish-pr.sh` rewrites a `feat` prefix on the commit subject and PR title of any issue that is not `type:feature` to the issue type's prefix: `enhance`, `fix`, `docs`, `test`, `refactor` or `chore`.
+- The Release issue lists enhancements under their own **Enhancements** heading, between Features and Fixes.
+- An enhancement counts toward the age trigger like a fix.
+- If your releases are built by GoReleaser with a changelog grouped by prefix, add a group for `^enhance` so they don't land under "Others".
 
 ## Release issues
 
@@ -198,8 +234,8 @@ The backlog run looks at the commits on the default branch since the latest `vX.
 
 - **Tag:** the highest tag of the exact form `vX.Y.Z` by version number. Other tags (`v1`, `v1.2`, `v1.2.3-rc1`) are ignored. No such tag: nothing happens, with a note in the run summary. No commits since the tag: nothing happens.
 - **Version:** minor bump (`vX.(Y+1).0`) if any commit since the tag is a `feat` (`feat:` or `feat(scope):`) or is marked breaking (`!` before the colon, or a line starting `BREAKING CHANGE:` in the message); otherwise a patch bump. It never proposes a major bump.
-- **When:** either (a) the oldest unreleased `fix` commit landed more than 7 days ago (committer date), or (b) the open milestone that matches the proposed version (see "Would slip") has no open issues left and at least one closed one. A milestone nothing was ever put in does not count as finished, and neither does a finished milestone for another version or one that is not named after a version.
-- **Body:** why now, draft release notes (Breaking, Features, Fixes), the commits grouped by prefix (`feat`, `fix`, other prefixes by name, then commits without one), and the open issues that would slip. Each notes section and each prefix group lists up to 50 entries and counts the rest. The whole body stays at or under 60,000 characters (GitHub refuses more than 65,536): if the commit list does not fit it is cut and ends with `…and N more commit(s) not listed here`; the rest of the body is never cut.
+- **When:** either (a) the oldest unreleased `fix` or `enhance` commit landed more than 7 days ago (committer date), or (b) the open milestone that matches the proposed version (see "Would slip") has no open issues left and at least one closed one. A milestone nothing was ever put in does not count as finished, and neither does a finished milestone for another version or one that is not named after a version.
+- **Body:** why now, draft release notes (Breaking, Features, Enhancements, Fixes), the commits grouped by prefix (`feat`, `enhance`, `fix`, other prefixes by name, then commits without one), and the open issues that would slip. Each notes section and each prefix group lists up to 50 entries and counts the rest. The whole body stays at or under 60,000 characters (GitHub refuses more than 65,536): if the commit list does not fit it is cut and ends with `…and N more commit(s) not listed here`; the rest of the body is never cut.
 - **Would slip:** open issues, by number, in the matching milestone. A milestone matches when its title, trimmed, is exactly `vX.Y.Z`, `X.Y.Z`, `vX.Y` or `X.Y` for the proposed version; the full version wins over the short form. So `v1.2` matches `v1.2.0` and `v1.2.4`; `v1.2.0 beta` and `Release v1.2.0` match nothing.
 - **One issue:** an open release issue is found by exact title `Release vX.Y.Z`, you as author, the `release` label and the `<!-- agent-release -->` marker in the body, all four. If one is open its body is refreshed (only when it changed) instead of opening another; this also happens on nights when neither trigger holds, so the list stays current. If the version changed (a `feat` landed after a patch issue was opened) the same issue is retitled. An issue someone else opened with the same title is never touched. Close the issue after you tag.
 - **Your own Release issue:** an open issue of yours titled `Release vX.Y.Z` that the loop did not file (no marker, or no `release` label) is never edited. While it is open and a release for that version is due, no second issue with that title is opened and none is retitled to it; the run summary and the Discord digest say so each night. Close or rename yours to get the proposal.
@@ -352,6 +388,7 @@ The coordinator loops: pick (`sprint-next.sh`), dispatch `work-issue` subagents,
 - The milestone is the sprint's scope. `sprint-select.sh` runs the nightly selection (`select-issues.sh scheduled`, unchanged, with the caller's settings) and keeps only the open issues in the finish-line milestone, in the nightly order. A ready issue in another milestone, or in none, isn't picked, however high it sits in tonight's queue.
 - Without a milestone the sprint takes the whole nightly queue. Its first `max_issues` entries are what tonight's run would pick.
 - Plus `agent:paired` issues in the finish-line milestone. The nightly run never takes them; a sprint may.
+- A `type:feature` issue, ready or paired, only when the finish-line milestone is approved for release (see "Release mode and maintenance mode").
 - Never two subagents on the same files. An issue's files are the paths its body and your comments (the assessment included) name, plus every file its open PR already changes. Overlapping issues wait. An issue that names no file runs alone.
 - A claim is the nightly job's `agent:in-progress` label (`claim-issue.sh`), so a sprint and the nightly run never take the same issue.
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Validate the backlog plan and apply what passes. Prints a Markdown digest to stdout.
 # Usage: apply-backlog.sh WORK_DIR   (expects candidates.json, current-labels.json, external.json, claude/result.json;
-#                                     planning.json from plan-due.sh is optional)
+#                                     planning.json from plan-due.sh is optional;
+#                                     release-mode.json from release-mode.sh: without it, or
+#                                     unreadable, the repository counts as in maintenance mode)
 # When planning.json says a milestone plan is due and the plan carries a proposal, the
 # "Plan vX.Y" issue is filed as the owner: body rendered by lib/planning.jq (plan_body),
 # label needs:human and nothing else, no milestone. Nothing here ever sets a milestone.
@@ -32,7 +34,16 @@ decided=$(jq -c '[.[] | select(.owner_decision == true) | .number]' "$w/candidat
 # Sub-issues of an agent:paired epic (the paired_parent fact from candidates.jq):
 # validate-plan.jq labels them agent:paired and routes them nowhere else.
 paired_parents=$(jq -c '[.[] | select((.paired_parent | type) == "number") | {key: (.number | tostring), value: .paired_parent}] | from_entries' "$w/candidates.json")
+# Release mode (#61): the candidates in a milestone approved for release. Only these may
+# be type:feature and agent:ready (validate-plan.jq). No mode file is maintenance mode.
+approved='[]'
+if [[ -s "$w/release-mode.json" ]] && ! approved=$(jq -ce '[.approved[].number]' "$w/release-mode.json" 2>/dev/null); then
+  echo "::warning::release-mode.json is unreadable; triage treats the repository as in maintenance mode." >&2
+  approved='[]'
+fi
+feature_ok=$(jq -c -L "$here/lib" --argjson a "$approved" 'include "release-mode"; [.[] | select(in_approved($a)) | .number]' "$w/candidates.json")
 jq --argjson allowed "$allowed" \
+   --argjson feature_ok "$feature_ok" \
    --argjson decided "$decided" \
    --argjson paired_parents "$paired_parents" \
    --argjson current "$(cat "$w/current-labels.json")" \

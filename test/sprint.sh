@@ -366,6 +366,8 @@ args=("$@"); jqx=""
 for ((i=0; i<${#args[@]}; i++)); do [[ "${args[i]}" == --jq ]] && jqx=${args[i+1]}; done
 out() { if [[ -n "$jqx" ]]; then jq -rc "$jqx"; else cat; fi; }
 a="$*"
+# Open milestones: v0.3.0, approved for release (#61) unless SP_MILESTONES says otherwise.
+ms_json=${SP_MILESTONES:-'[{"number": 3, "title": "v0.3.0", "due_on": null, "description": "agent-loop: release"}]'}
 case "$a" in
   "repo view"*) echo o/r ;;
   "api repos/o/r --jq .default_branch") echo main ;;
@@ -382,7 +384,7 @@ case "$a" in
   *"/issues/"*"/comments"*) if [[ -f "$SP/comments.json" ]]; then out < "$SP/comments.json"; else echo '[]' | out; fi ;;
   "api -X PATCH"*) : ;;
   "api graphql"*) echo '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}' | out ;;
-  *"/milestones"*) echo '[{"number": 3, "title": "v0.3.0", "due_on": null}]' | out ;;
+  *"/milestones"*) printf '%s' "$ms_json" | out ;;
   *) echo "unexpected gh $a" >&2; exit 1 ;;
 esac
 GH
@@ -556,6 +558,22 @@ check "next: the limit is 1 to 3" "2|2" "$(sprun bash "$root/scripts/sprint-next
 for i in 3 2 10; do jq '.milestone = null' "$sp/issues/$i.json" > "$sp/i" && mv "$sp/i" "$sp/issues/$i.json"; done
 check "next: issues outside the finish-line milestone are never started (#55)" "[]|true" \
   "$(sprun bash "$root/scripts/sprint-next.sh" 3 v0.3.0 2>/dev/null | jq -c '[.start[].issue, .skipped[].issue] - [5,7,11]')|$(sprun bash "$root/scripts/sprint-next.sh" 3 v0.3.0 2>/dev/null | jq -c '[.start[].issue] | index(5) != null')"
+
+# Release mode (#61): the stub's v0.3.0 carries "agent-loop: release" above. Without it
+# the repository is in maintenance mode and a sprint takes no feature, ready or paired.
+jq '.milestone = {number: 3, title: "v0.3.0"}' "$sp/issues/2.json" > "$sp/i" && mv "$sp/i" "$sp/issues/2.json"
+mkissue 12 agent:paired,type:feature "" v0.3.0 tonhe 12
+check "select (release): the sprint takes the feature in its approved milestone, ready and paired" "true|true" \
+  "$(sprun bash "$root/scripts/sprint-select.sh" v0.3.0 2>/dev/null | jq -c '(.ready | index(2) != null)')|$(sprun bash "$root/scripts/sprint-select.sh" v0.3.0 2>/dev/null | jq -c '(.paired | index(12) != null)')"
+maint='[{"number": 3, "title": "v0.3.0", "due_on": null, "description": "collecting ideas"}]'
+check "select (maintenance): a sprint on an unapproved milestone takes no feature, ready or paired; the rest stays" '{"ready":[5],"paired":[7,11]}' \
+  "$(sprun env SP_MILESTONES="$maint" bash "$root/scripts/sprint-select.sh" v0.3.0 2>/dev/null)"
+check "next (maintenance): the feature is never started" "false" \
+  "$(sprun env SP_MILESTONES="$maint" bash "$root/scripts/sprint-next.sh" 3 v0.3.0 2>/dev/null | jq -c '[.start[].issue, .skipped[].issue] | (index(2) != null or index(12) != null)')"
+check "select (maintenance): the nightly selection skips it too, though it is agent:ready" "false" \
+  "$(sprun env SP_MILESTONES="$maint" OWNER_LOGIN=tonhe MAX_ISSUES=100 bash "$root/scripts/select-issues.sh" scheduled 2>/dev/null | jq -c 'index(2) != null')"
+rm -f "$sp/issues/12.json"
+jq '.milestone = null' "$sp/issues/2.json" > "$sp/i" && mv "$sp/i" "$sp/issues/2.json"
 
 # ---------- sprint-progress.sh: Discord line + one comment on the Release issue ----------
 mkissue 12 release "Release v0.3.0 <!-- agent-release -->" v0.3.0 tonhe 12

@@ -38,7 +38,7 @@ Set once: `S=${CLAUDE_PLUGIN_ROOT}/scripts` and `R=$(gh repo view --json nameWit
     "found_issues": [{"title": "...", "body": "what is wrong, file:line evidence, how to verify a fix"}],
     "live_check": {"commands": "sudo make lab-live", "why": "needs raw sockets"}}
    ```
-   Leave `live_check` out when none is needed. No attribution lines, no `Closes #N`: the script adds the closing line and the marker. Then:
+   Leave `live_check` out when none is needed. The commit and PR title prefix follow the issue's type: `enhance:` for `type:enhancement`, `fix:` for `type:bug`, and so on, never `feat` unless the issue is labelled `type:feature` (a `feat` makes the next release a minor one; `publish-pr.sh` rewrites one on any other issue). No attribution lines, no `Closes #N`: the script adds the closing line and the marker. Then:
    `PR=$(bash $S/sprint-publish.sh N result.json)`. If it refuses for protected paths, go back to step 4.
 10. **File what you noticed.** Every real problem you saw and did not fix goes in as an issue before you report: `GITHUB_REPOSITORY=$R MAX_FOUND=5 bash $S/file-found.sh N result.json "$PR"`. It prints one line per filed issue (`- 123 title`) and skips duplicates. Nothing stays "noted but not filed".
 11. **Release the claim** once the PR is open: `bash $S/claim-issue.sh release N`, as the nightly job does. The open `issue-N` PR keeps the issue out of the nightly selection by itself. (`claim-issue.sh stop` already released it if you stopped.)

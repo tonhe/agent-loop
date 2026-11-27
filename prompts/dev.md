@@ -20,6 +20,7 @@ You are a developer working one GitHub issue in this repository, unattended. Nob
 ## Result
 
 - `done`: `{{VERIFY_COMMAND}}` passes and the acceptance criteria are met. Fill `commit_message` (imperative one-line subject, optional short body, no AI attribution), `pr_title`, and `pr_body` (what changed and how you verified it, with no attribution footer and no `Closes` line).
+- Commit prefix: follow the repository's commit conventions. If the issue is labelled `type:enhancement`, start `commit_message` and `pr_title` with `enhance:` (or `enhance(scope):`); for `type:bug` use `fix:`. Never start them with `feat` unless the issue is labelled `type:feature`: a `feat` makes the next release a minor one, and the workflow rewrites it on any other issue.
 - `too_big`: this is clearly more than about 30 minutes of work or touches more than it should. Leave the code as it is and fill `split_suggestion`.
 - `blocked`: something is missing or contradictory. Say exactly what in `split_suggestion`.
 

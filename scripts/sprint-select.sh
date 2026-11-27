@@ -6,7 +6,9 @@
 #           sprint's scope (#55). Without one it is the whole queue, and its first
 #           max_issues entries are what tonight's run would pick
 #   paired  agent:paired issues in the finish-line milestone, which only a local agent
-#           may take (lib/sprint.jq, paired_ready); none without a milestone
+#           may take (lib/sprint.jq, paired_ready); none without a milestone. A
+#           type:feature in either list only when the milestone is approved for
+#           release (lib/release-mode.jq, #61)
 # Settings (owner, selection_order) come from the caller workflows (loop-config.sh), so
 # a sprint orders work as the nightly run does.
 # Usage: sprint-select.sh [MILESTONE_TITLE]
@@ -38,5 +40,10 @@ if [[ -n "$milestone" ]]; then
   paired=$(jq -nc -L "$here/lib" --argjson issues "$issues" --argjson prs "$prs" --argjson open "$open" \
              --argjson native "$native" --arg owner "$OWNER_LOGIN" --arg m "$milestone" \
              'include "sprint"; {issues: $issues, prs: $prs} | paired_ready($owner; $m; $open; $native)')
+  # Release mode (#61): a paired type:feature only in a milestone approved for release,
+  # as select-issues.sh does for the ready list.
+  approved=$(bash "$here/scripts/release-mode.sh" | jq -c '[.approved[].number]')
+  paired=$(jq -nc -L "$here/lib" --argjson p "$paired" --argjson issues "$issues" --argjson a "$approved" \
+             'include "release-mode"; [$p[] as $n | $issues[] | select(.number == $n) | select(ready_allowed($a)) | .number]')
 fi
 jq -nc --argjson r "$ready" --argjson p "$paired" '{ready: $r, paired: $p}'

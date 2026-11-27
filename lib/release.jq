@@ -47,6 +47,8 @@ def commit_info:
      notes: $notes};
 
 # bump: [commit_info] -> "minor" when any commit is a feat or breaking, else "patch".
+# Every other prefix is a patch, enhance included: an enhancement (type:enhancement, #61)
+# changes existing behaviour or output and ships in a patch release.
 def bump: if any(.[]; .type == "feat" or .breaking) then "minor" else "patch" end;
 
 # next_version($tag): [commit_info] -> "vX.Y.Z" after $tag ("vX.Y.Z").
@@ -70,26 +72,28 @@ def milestone_for($version):
 
 # release_reasons($now; $days; $version): {commits: [commit_info], milestones: [{number,
 # title, open_issues, closed_issues}]} -> [why a release is due]; [] when it is not.
-#   (a) the oldest unreleased fix commit is more than $days days old ($now: epoch seconds)
+#   (a) the oldest unreleased fix or enhance commit is more than $days days old ($now:
+#       epoch seconds). Both ship in a patch, so either one makes a patch release due.
 #   (b) the open milestone for $version (milestone_for) has no open issues left (and at
 #       least one closed: a milestone nobody has put anything in yet is not finished).
 #       Only that milestone counts: a finished "Backlog cleanup" or a milestone for some
 #       other version says nothing about the version being proposed.
 def release_reasons($now; $days; $version):
-  ([.commits[] | select(.type == "fix") | .date | select(. != null)] | min) as $oldest
+  ([.commits[] | select(.type == "fix" or .type == "enhance") | .date | select(. != null)] | min) as $oldest
   | ((.milestones // []) | milestone_for($version)) as $ms
   | [ (if $oldest != null and (($now - ($oldest | fromdateiso8601)) > ($days * 86400))
-       then "the oldest unreleased fix landed on \($oldest[:10]), more than \($days) days ago" else empty end),
+       then "the oldest unreleased fix or enhancement landed on \($oldest[:10]), more than \($days) days ago" else empty end),
       ($ms | select(. != null) | select((.open_issues // 0) == 0 and (.closed_issues // 0) > 0)
        | "milestone \(.title | safe_line(80)) has no open issues left") ];
 
-# grouped: [commit_info] -> [{prefix, commits}] : feat, fix, the other prefixes by name,
-# then "other" (no conventional prefix).
+# grouped: [commit_info] -> [{prefix, commits}] : feat, enhance, fix, the other prefixes
+# by name, then "other" (no conventional prefix).
 def grouped:
   map(. + {prefix: (.type // "other")})
   | group_by(.prefix)
   | map({prefix: .[0].prefix, commits: .})
-  | sort_by([(if .prefix == "feat" then 0 elif .prefix == "fix" then 1 elif .prefix == "other" then 3 else 2 end), .prefix]);
+  | sort_by([(if .prefix == "feat" then 0 elif .prefix == "enhance" then 1 elif .prefix == "fix" then 2
+               elif .prefix == "other" then 4 else 3 end), .prefix]);
 
 # loop_release($owner): issue {title, body, author, labels} -> true when it is a release
 # issue this loop filed: exact title, the owner as author, the release label AND the
@@ -168,6 +172,7 @@ def release_body($tag; $version; $reasons; $milestone; $slip):
         "" ]
       + section("Breaking"; [$breaking[] | note_line, (.notes[] | "  - " + safe_line)])
       + section("Features"; [$commits[] | select(.type == "feat") | note_line])
+      + section("Enhancements"; [$commits[] | select(.type == "enhance") | note_line])
       + section("Fixes"; [$commits[] | select(.type == "fix") | note_line])
       + [ "## Commits since `\($tag)`", "" ]
     ) as $head

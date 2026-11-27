@@ -6,6 +6,8 @@
 #         --argjson decided [issue numbers with an "Owner decision" comment]   optional, default []
 #         --argjson paired_parents {"<n>": number of the agent:paired epic it is a sub-issue of}
 #                                                                              optional, default {}
+#         --argjson feature_ok [issue numbers in a milestone approved for release (lib/release-mode.jq)]
+#                                                                              optional, default []
 # Output: {"apply": [...], "rejected": [{issue, reason}]}
 #
 # Rules enforced here (not in the prompt):
@@ -30,15 +32,22 @@
 #    alike), the risk gate adds no needs:human, and the issue is not split. The assessment
 #    and the question are kept: triage may only comment. This rule comes first: a decided
 #    sub-issue of a paired epic does not get agent:paired either.
+#  - release mode (#61): a type:feature issue (the type it ends with) may be agent:ready only
+#    when it is in $feature_ok, i.e. in a milestone approved for release. Otherwise
+#    agent:ready is not added, and is removed when the issue has it; needs:human is not
+#    added for that (planning is the owner's call, not a question), and the risk gate
+#    below does not see a refused agent:ready. Without $feature_ok every issue counts as
+#    outside, which is the safe side. An Owner decision still freezes everything.
 #  - nothing here can set a milestone: the output is built field by field, so a
 #    "milestone" (or any other extra field) in an action or a split child is dropped
 def managed: ["risk:low","risk:medium","risk:high",
-              "type:bug","type:feature","type:docs","type:test","type:refactor","type:chore",
+              "type:bug","type:feature","type:enhancement","type:docs","type:test","type:refactor","type:chore",
               "agent:ready","needs:human"];
 def prefix($p): map(select(startswith($p)));
 
 ($ARGS.named.decided // []) as $decided
 | ($ARGS.named.paired_parents // {}) as $paired_parents
+| ($ARGS.named.feature_ok // []) as $feature_ok
 | reduce (.actions // [])[] as $a ({apply: [], rejected: []};
   if ($allowed | index($a.issue)) == null then
     .rejected += [{issue: $a.issue, reason: "issue not in allowed set"}]
@@ -77,6 +86,11 @@ def prefix($p): map(select(startswith($p)));
     # $adopt: both routing labels go (those the issue has; see $remove_final), asked or not
     | (if $adopt then ["agent:ready", "needs:human"]
        else [($a.remove_labels // [])[] | select(. == "agent:ready" or . == "needs:human") | select($paired | not)] end) as $remove
+    # release mode: a feature outside an approved milestone gets no agent:ready
+    | ((($cur + $add3) | index("type:feature")) != null and ($feature_ok | index($a.issue)) == null) as $feature_held
+    | ($feature_held and (($add3 + $cur) | index("agent:ready")) != null and ($paired | not)) as $feature_refused
+    | (if $feature_held then $add3 - ["agent:ready"] else $add3 end) as $add3
+    | (if $feature_held and ($paired | not) then $remove + ["agent:ready"] | unique else $remove end) as $remove
     | ((($cur + $add3) - $remove) | unique) as $final
     | ([$final[] | select(startswith("risk:"))][0] // "none") as $risk
     | ($risk == "risk:low" or ($allow_medium and $risk == "risk:medium")) as $risk_ok
@@ -99,6 +113,7 @@ def prefix($p): map(select(startswith($p)));
         question: ($a.question // null),
         split_into: (if $paired then [] else [($a.split_into // [])[:5][] | {title, body}] end),
         notes: ([$gate.note,
+                 (if $feature_refused then "agent:ready refused: type:feature outside a milestone approved for release (maintenance for this issue)" else empty end),
                  (if ($bad | length) > 0 then "ignored unmanaged labels: \($bad | join(", "))" else empty end),
                  (if $adopt
                   then "agent:paired added, agent:ready and needs:human dropped, and no split: sub-issue of #\($epic), which is agent:paired (owned by the interactive agent)"
